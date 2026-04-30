@@ -22,12 +22,19 @@ std::vector<double> smooth_height(
     Shape                        shape,
     double                       sigma)
 {
-    if (size <= 0.0) {
-        throw std::invalid_argument("smooth_height: size must be > 0");
-    }
-    if (method == SmoothMethod::Gaussian && sigma <= 0.0) {
+    // !isfinite covers NaN / +inf / -inf — the `<= 0` test would silently
+    // accept NaN (NaN <= 0 is false) and downstream radiusSearch on a NaN
+    // radius would just return zero matches, leaving the user with the
+    // input z values and no error. Same trap on sigma.
+    if (!std::isfinite(size) || size <= 0.0) {
         throw std::invalid_argument(
-            "smooth_height: sigma must be > 0 when method == Gaussian");
+            "smooth_height: size must be a finite positive number");
+    }
+    if (method == SmoothMethod::Gaussian &&
+        (!std::isfinite(sigma) || sigma <= 0.0)) {
+        throw std::invalid_argument(
+            "smooth_height: sigma must be a finite positive number when "
+            "method == Gaussian");
     }
 
     const std::size_t n = pts.n;

@@ -20,6 +20,6 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.mark.skip(reason="Matrix2D is C++-only in v0.1; concrete tests added in Phase 1+")
+@pytest.mark.skip(reason="No CHM round-trip yet; replace in Phase 3 when dalponte2016 lands Matrix2D<int> output")
 def test_matrix2d_column_major_round_trip():
     pass

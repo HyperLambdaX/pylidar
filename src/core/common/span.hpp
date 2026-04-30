@@ -16,10 +16,13 @@ struct Span {
     T*          data = nullptr;
     std::size_t size = 0;
 
+    // end() guards against `nullptr + 0` (UB by C++17 [expr.add]; UBSan flags
+    // it). When the span is empty we return `data` directly, which equals
+    // begin() and gives a well-defined empty range without pointer arithmetic.
     constexpr T*       begin()       noexcept { return data; }
-    constexpr T*       end()         noexcept { return data + size; }
+    constexpr T*       end()         noexcept { return size ? data + size : data; }
     constexpr const T* begin() const noexcept { return data; }
-    constexpr const T* end()   const noexcept { return data + size; }
+    constexpr const T* end()   const noexcept { return size ? data + size : data; }
 
     constexpr T&       operator[](std::size_t i)       noexcept { return data[i]; }
     constexpr const T& operator[](std::size_t i) const noexcept { return data[i]; }

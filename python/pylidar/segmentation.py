@@ -13,6 +13,7 @@ Later phases:
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -73,8 +74,11 @@ def smooth_height(
     xyz = ensure_xyz_float64(xyz)
 
     size = float(size)
-    if size <= 0.0:
-        raise ValueError(f"size must be > 0, got {size}")
+    # `<= 0` alone lets NaN through silently (NaN <= 0 is False); the C++
+    # algorithm would then run a NaN-radius radiusSearch, find no matches,
+    # and return the original z values with no error. Reject NaN/inf here.
+    if not math.isfinite(size) or size <= 0.0:
+        raise ValueError(f"size must be a finite positive number, got {size}")
 
     method_key = method.lower() if isinstance(method, str) else method
     if method_key not in _METHOD_MAP:
@@ -95,9 +99,10 @@ def smooth_height(
         # the Gaussian branch; Mean ignores it).
         sigma = size / 6.0
     sigma = float(sigma)
-    if method_int == 2 and sigma <= 0.0:
+    if method_int == 2 and (not math.isfinite(sigma) or sigma <= 0.0):
         raise ValueError(
-            f'sigma must be > 0 when method="gaussian", got {sigma}'
+            f'sigma must be a finite positive number when method="gaussian", '
+            f'got {sigma}'
         )
 
     return _core.smooth_height(xyz, size, method_int, shape_int, sigma)

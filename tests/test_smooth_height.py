@@ -105,3 +105,47 @@ def test_smooth_height_rejects_bad_shape_string():
     xyz = np.zeros((5, 3), dtype=np.float64)
     with pytest.raises(ValueError, match="shape"):
         pylidar.smooth_height(xyz, size=1.0, method="mean", shape="hexagon")
+
+
+@pytest.mark.parametrize("bad_size", [float("nan"), float("inf"), float("-inf")])
+def test_smooth_height_rejects_nonfinite_size(bad_size):
+    """NaN / inf size must raise ValueError, not silently produce garbage.
+
+    Without the isfinite guard, NaN slipped past `size <= 0.0` (NaN compares
+    False against everything) and the C++ ran with a NaN search radius —
+    nanoflann found zero matches and the algorithm returned the input z
+    values verbatim. Same trap with inf radius.
+    """
+    xyz = np.zeros((5, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match="size"):
+        pylidar.smooth_height(xyz, size=bad_size, method="mean",
+                              shape="circular")
+
+
+@pytest.mark.parametrize("bad_sigma", [float("nan"), float("inf")])
+def test_smooth_height_rejects_nonfinite_sigma_for_gaussian(bad_sigma):
+    """method='gaussian' with NaN/inf sigma must raise — for mean it's
+    irrelevant and the validator deliberately stays quiet."""
+    xyz = np.zeros((5, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match="sigma"):
+        pylidar.smooth_height(xyz, size=1.0, method="gaussian",
+                              shape="circular", sigma=bad_sigma)
+
+
+def test_smooth_height_core_rejects_nan_size_directly():
+    """C++ core must reject NaN even when callers bypass the Python wrapper.
+
+    Spec §6.4: input validation primarily happens in Python, but invariant
+    checks also live in C++ so downstream C++ consumers (including future
+    direct linkers of pylidar::core) don't get silent garbage.
+    """
+    from pylidar import _core
+
+    xyz = np.zeros((5, 3), dtype=np.float64)
+    # method=1 (mean), shape=2 (circular), sigma=1.0; size=NaN is the bad one.
+    # nanobind maps std::invalid_argument to ValueError.
+    with pytest.raises(ValueError, match="size"):
+        _core.smooth_height(xyz, float("nan"), 1, 2, 1.0)
+    # And gaussian + NaN sigma directly through the C++ entry point.
+    with pytest.raises(ValueError, match="sigma"):
+        _core.smooth_height(xyz, 1.0, 2, 2, float("nan"))

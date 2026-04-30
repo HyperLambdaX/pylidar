@@ -149,6 +149,32 @@
 - 影响：Phase 8 生成 smooth_height 的 lidR 参考 fixture 时**不要**走 R 包装；直接 `lidR:::C_smooth(las, size, method, shape=1, sigma, ncpu)`（C 入口，shape=1 强制 Rectangle）才能拿到真正的 square 输出对照 pylidar。circular 走 R API 没问题。
 - 我们 C++ 端的 Square / Circular 行为不受影响——已经从 `LAS::z_smooth` 那一层直译，没经过 R 包装那行。
 
+### 输入校验的"NaN 静默通过"陷阱（Phase 1 抽出）
+
+- **`x <= 0` 不能挡 NaN**。`float('nan') <= 0` 是 `False`，`std::isnan(x) && x <= 0` 也是 `false`。NaN 会一路穿到算法里，下游 nanoflann 的 `dist < NaN` 又是 false，结果是"零邻居 → 用回退分支输出原始 z 值，零警告"。
+- **正数参数的 idiomatic check**：Python 用 `not math.isfinite(x) or x <= 0`；C++ 用 `!std::isfinite(x) || x <= 0.0`。**inf 也要拦**——`half_res = inf` 同样把搜索半径推到非正常区。
+- **双层都查**。Spec §6.4 写明 Python 层负责 user-facing 校验，C++ 内部不变量也要查。理由：下游可能直接 link `pylidar::core` 或调 `_core.*` 绕过 wrapper（我们的 NaN 测试就是这么测 C++ 层的）。
+- **测试模板**：每个数值参数加 `pytest.mark.parametrize("bad", [nan, inf, -inf])`，外加一个 `_core.<algo>(..., nan, ...)` 的直调测试覆盖 C++ 层。Phase 1 `tests/test_smooth_height.py` 末尾 3 个 test 是模板。
+
+### nanobind 异常映射（Phase 1 实测）
+
+- `std::invalid_argument` → Python `ValueError`（自动）
+- `std::out_of_range` → `IndexError`
+- `std::runtime_error` → `RuntimeError`
+- 算法内部不变量违反就抛 `std::invalid_argument`，不要自己手动 `throw nb::value_error(...)`——保持 C++ core 与 binding 解耦，core 不依赖 nanobind 头。
+
+### 全局回调的重入安全（Phase 1 抽出）
+
+- **`std::function` 的全局存储 + `emit() { const auto& cb = storage(); cb(); }` 是雷**：如果 callback 内部触发 `set_callback({})`，存储被 move，回调中的 `cb` 引用就悬了。
+- **修法**：emit 里把 callback **拷到栈上** 再调（`Callback cb = storage(); if (cb) cb(...);`）。我们的 callback 内含 `shared_ptr<nb::object>`，拷贝 = 一次原子 ref-count 增量，非热路径开销可忽略。
+- **跨线程并发改 callback** 仍是 caller 责任（不是 emit() 能 fix 的）。文档里讲清楚，别在算法运行期间动 callback。
+
+### Span<T> 默认状态的 UB（Phase 1 修复）
+
+- **`data + size` 在 `data=nullptr, size=0` 时是 UB**（C++17 [expr.add]：指针算术要求 P 指向数组元素或末尾，nullptr 不指向任何数组）。GCC/Clang/MSVC 实践上不出怪事，但 `-fsanitize=undefined` 会标红。
+- **修法**：`end()` 写 `return size ? data + size : data;`——空时直接返 `data`，避免对空指针做加法。`begin()` 不需要改（直接返 `data` 没算术）。
+- 后续算法用 `Span<T>{}` 表示空入参时不会被这条坑到。
+
 ### Python 包装层模式（Phase 1 抽出）
 
 - **C++ 算法函数返回 `std::vector<double>` → bindings 里手动转 numpy**（`new double[n]` + `nb::capsule` 拥有 + `nb::ndarray<nb::numpy, double, nb::ndim<1>>`）。比 `@stl/vector.h` 给出来的 Python list 体面，比直接用 `nb::ndarray` 写 in-place 输出参数干净。模板已在 `module.cpp::vector_to_numpy_1d` 里。

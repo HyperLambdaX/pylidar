@@ -9,9 +9,11 @@
 // translation units the same callback instance. When the core gets enough .cpp
 // files to warrant a static library we can move the storage out-of-line.
 //
-// Thread-safety caveat: the callback pointer is *not* atomic. Don't change it
-// while algorithm code is running. The Python entry point only wires it once
-// at startup in normal usage.
+// Thread-safety caveat: the storage slot is *not* atomic. Cross-thread
+// set_callback() during algorithm execution is the caller's responsibility —
+// don't change it while algorithm code is running. emit() does protect against
+// the *re-entrant* case (a callback that calls set_callback from inside its
+// own body) by copying the std::function locally before invoking it.
 
 #pragma once
 
@@ -45,8 +47,14 @@ inline const Callback& get_callback() noexcept {
 }
 
 // Emit a log line. No-op if no callback is set.
+//
+// Copies the callback locally so a re-entrant `set_callback({})` from inside
+// the callback body (e.g. a Python user resetting the hook from within the
+// hook itself) doesn't pull the function out from under our call. The copy
+// is cheap — for the typical Python-callable case it just bumps the
+// shared_ptr<nb::object> ref count once.
 inline void emit(std::string_view msg) {
-    const Callback& cb = get_callback();
+    Callback cb = detail::storage();
     if (cb) {
         cb(msg);
     }
