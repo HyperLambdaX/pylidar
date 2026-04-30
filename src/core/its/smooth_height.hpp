@@ -17,17 +17,13 @@
 #include <vector>
 
 #include "common/point_cloud.hpp"
+#include "its/shape.hpp"
 
 namespace pylidar::its {
 
 enum class SmoothMethod : int {
     Mean     = 1,
     Gaussian = 2,
-};
-
-enum class Shape : int {
-    Square   = 1,
-    Circular = 2,
 };
 
 // Smooth the Z values of a point cloud by averaging (or Gaussian-weighting)

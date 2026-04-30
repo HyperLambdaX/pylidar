@@ -7,6 +7,7 @@
 
 add_library(pylidar_its STATIC
     smooth_height.cpp
+    lmf.cpp
 )
 add_library(pylidar::its ALIAS pylidar_its)
 

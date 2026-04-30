@@ -35,6 +35,21 @@ Requires CMake ≥ 3.26 and a C++17 compiler with OpenMP. On macOS,
 `brew install libomp` first.
 
 ```sh
+# First-time setup (creates .venv, installs the editable wheel + test deps).
+uv venv --python 3.14
 uv pip install -e ".[test]"
-pytest tests -m "not requires_fixture"
+
+# Run the test suite — no `source .venv/bin/activate` needed; uv run picks
+# up the project's environment automatically.
+uv run pytest tests -m "not requires_fixture"
 ```
+
+After modifying any C++ source you need to rebuild the extension:
+
+```sh
+uv pip install -e ".[test]" --no-deps   # rebuilds via scikit-build-core (~3s)
+uv run pytest tests -m "not requires_fixture"
+```
+
+`uv run` does not trigger CMake — it only resolves and runs the command in
+the project env. C++ rebuilds always go through `uv pip install -e`.

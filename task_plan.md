@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 1 — smooth_height（完成，待 commit / Phase 2 启动）
+Phase 2 — lmf_chm + lmf_points（完成，待 commit / Phase 3 启动）
 
 ## Reference Documents
 
@@ -51,12 +51,14 @@ Phase 1 — smooth_height（完成，待 commit / Phase 2 启动）
 
 ### Phase 2: lmf_chm + lmf_points
 
-- [ ] `src/core/its/lmf.{hpp,cpp}`（抽 `LAS::fast_local_maximum_filter` 两分支）
-- [ ] bindings 加 `_core.lmf_chm` 和 `_core.lmf_points`
-- [ ] segmentation.py 实现 `locate_trees_lmf_chm` / `locate_trees_lmf_points`
-- [ ] `tests/test_lmf.py`（5 case：5×5 CHM 三峰 / hmin 过滤 / 三簇点云 / ws=0 抛 ValueError / CHM 全 NaN）
-- [ ] **Acceptance**：5 测试全过；transform 把 row/col 转世界 XY 手算对照
-- **Status:** pending
+- [x] `src/core/its/lmf.{hpp,cpp}`（抽 `LAS::filter_local_maxima(ws,hmin,circular)`；CHM 分支走虚拟点云路径，与 lidR `raster_as_las` 一致）
+- [x] `src/core/its/shape.hpp`（共享 `Shape` enum，避免 smooth_height ↔ lmf 互相 include）
+- [x] bindings 加 `_core.lmf_chm` 和 `_core.lmf_points`（共用 `treetops_to_numpy_xyz` helper）
+- [x] segmentation.py 实现 `locate_trees_lmf_chm` / `locate_trees_lmf_points`
+- [x] `_validate.py` 实装 `ensure_chm_float64` / `ensure_transform`
+- [x] `tests/test_lmf.py`（11 case：5 task_plan 必需 + square smoke + dtype/transform/2D 错误 + ws nan/inf/-inf parametrize + C++ 直调 NaN）
+- [x] **Acceptance**：本机 `pytest tests -m "not requires_fixture"` = 29 passed, 1 skipped；transform 已手算对照（test_lmf_chm_three_peaks_transform_world_xy）
+- **Status:** complete
 
 ### Phase 3: dalponte2016
 

@@ -34,3 +34,37 @@ def smooth_height(
     accepts the public string-based API.
     """
     ...
+
+def lmf_points(
+    xyz: npt.NDArray[np.float64],
+    ws: float,
+    hmin: float,
+    shape: int,
+) -> npt.NDArray[np.float64]:
+    """Internal: local-maximum-filter tree-top detection on (N, 3) XYZ.
+
+    Returns an (M, 3) float64 array of (x, y, z) tree tops.
+    shape: 1=square, 2=circular.
+
+    Use :func:`pylidar.locate_trees_lmf_points` instead.
+    """
+    ...
+
+def lmf_chm(
+    chm: npt.NDArray[np.float64],
+    origin_x: float,
+    origin_y: float,
+    pixel_size: float,
+    ws: float,
+    hmin: float,
+    shape: int,
+) -> npt.NDArray[np.float64]:
+    """Internal: local-maximum-filter tree-top detection on a CHM raster.
+
+    Caller passes the CHM as a row-major (H, W) float64 array plus an
+    unpacked (origin_x, origin_y, pixel_size) triple. Returns (M, 3)
+    float64 (x_world, y_world, z).
+
+    Use :func:`pylidar.locate_trees_lmf_chm` instead.
+    """
+    ...

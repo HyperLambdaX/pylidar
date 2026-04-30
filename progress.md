@@ -74,9 +74,46 @@
 - Acceptance：`uv pip install -e ".[test]" --no-deps`（macOS arm64 / py3.14.2）成功；`pytest tests -m "not requires_fixture"` = **10 passed, 1 skipped**（task_plan 要求 4 case，实交 6，全过）。
 - 上游 lidR 发现的小坑（仅供记录，**不影响** v0.1）：`R/smooth_height.R` 第 45 行 `if (method == "circle") shape <- 1 else shape <- 2` 应是 `if (shape == "circle") ...`，导致 lidR 的 `smooth_height(..., shape="square")` 实际上走 circular 分支。Phase 8 生成 fixture 时若要测 square 必须直接调 `C_smooth(..., shape=1, ...)` 绕开 R 包装。
 
-### Phase 2-8
+### Phase 2: lmf_chm + lmf_points
+
+- **Status:** complete（2026-04-30）
+- 设计选择（per spec §11，无新增 user gate；均为 spec 既定）：
+  1. CHM 分支按 lidR 上游 `locate_trees.SpatRaster → raster_as_las → C_lmf` 的路径——把 CHM 非-NaN 像素中心当作虚拟点云投给同一个内部 helper。这样 `lmf_chm` 与 `lmf_points` 共算法主体，Phase 8 fixture 对照只需测一次。
+  2. 共享 `Shape` enum 拆到 `src/core/its/shape.hpp`（被 `smooth_height.hpp` + `lmf.hpp` 都 include）；`SmoothMethod` 仍留在 `smooth_height.hpp`（算法私有）。这是 Phase 2 顺手的 in-family 小重构。
+  3. `transform` 在 binding 接口上拆成 3 个 `double`（`origin_x`, `origin_y`, `pixel_size`），不引 `nb::tuple` / dataclass；Python wrapper 拿到 3-tuple 后展开传入。spec §13 的"v0.2 视反馈引 dataclass"决策保留。
+  4. CHM (H,W) row-major numpy → 列主序 `Matrix2D<double>` 在 binding 层一次 `O(H·W)` 嵌套循环拷贝（不是 transpose 函数）。lmf 不强求列主序，但保持惯例为 Phase 3-4 的 dalponte/silva 直译铺路（spec §8.1）。
+  5. 输出统一 `(M, 3)` float64 (x, y, z)，**不带 ID 列**（`TreeTop.id` 永为 0）。Python segmentation 层在 Phase 3 接入 dalponte/silva 时再分配 1..M（spec §7 锁定）。
+- Files created/modified:
+  - `src/core/its/shape.hpp`（创建；2 行 enum，被 smooth_height + lmf 共用）
+  - `src/core/its/smooth_height.hpp`（删本地 `Shape`，include `shape.hpp`）
+  - `src/core/its/lmf.{hpp,cpp}`（创建；`lmf_filter_impl` 直译 LAS::filter_local_maxima(ws, min_height, circular)；`lmf_points` / `lmf_chm` 包装，`lmf_chm` 走虚拟点云路径）
+  - `src/core/its/CMakeLists.txt`（lmf.cpp 加入 STATIC lib）
+  - `src/bindings/module.cpp`（加 `treetops_to_numpy_xyz` helper、`check_shape_int` 共用、`bind_lmf_points` / `bind_lmf_chm` 两个 m.def；CHM 在 binding 层 `H·W` 拷贝到列主序 `Matrix2D<double>`）
+  - `python/pylidar/_validate.py`（实装 `ensure_chm_float64` / `ensure_transform`；Phase 2 占位 NotImplementedError 全部去除）
+  - `python/pylidar/segmentation.py`（加 `locate_trees_lmf_points` / `locate_trees_lmf_chm`；私有 helper `_resolve_shape` / `_check_ws_hmin`）
+  - `python/pylidar/__init__.py`（re-export 两新函数）
+  - `python/pylidar/_core.pyi`（加 `lmf_points` / `lmf_chm` 存根）
+  - `tests/test_lmf.py`（创建；11 case：5 task_plan 必须 + square smoke + dtype/transform/2D 错误 + ws nan/inf/-inf parametrize + C++ 直调 NaN 校验）
+- Acceptance：`uv pip install -e ".[test]" --no-deps`（macOS arm64 / py3.14.2）成功；`uv run pytest tests -m "not requires_fixture"` = **33 passed, 1 skipped**（task_plan 要求 5 case，实交 13——含两个 Phase 2 中后期 user 提的回归：tied-heights 确定性 + C++ 直调 hmin NaN）。
+- 从上游 LMF 主动偏离的两处（user-flagged Phase 2 后期修复，详见 lmf.cpp 文件头）：
+  1. **Tie-break 改成确定性 `z == zi && j < i_u`**（替换 lidR 那条 race-y `if (z == zmax && filter[pt.id])`）。原 race 在本地 4-tied-points 实测会随机返回 1 / 4 / "最后一个"——非确定性，不可接受。改成"最低索引赢"后单线程多线程一致。
+  2. **删 `state[j] = kNLM` 跨迭代写优化** —— tie-break 改确定性后此优化无算法价值且本身就是又一次裸写。删掉后每个外层迭代仅写自己 `filter[i_u]`，数据无 race；同步删 `#pragma omp critical`，并允许 `z > zi` 时立即 break。
+- C++ 加 `std::isfinite(hmin)` 校验（user-flagged）：spec §6.4 要求 core 独立 link 时也得查不变量；hmin=NaN 原本会让所有点静默被跳过返回空集——与 Phase 1 size/sigma 同类 bypass。
+- 顺手清理：`state` 向量、`kUKN/kNLM/kLMX` 三个 char 常量、`zmax` 冗余变量全删。lmf.hpp / lmf.cpp 文件头注释完整描述这两处与上游的偏离及理由。
+
+### Phase 3-8
 
 - **Status:** pending（详见 task_plan.md）
+
+## 5-Question Reboot Check (post Phase 2)
+
+| Question | Answer |
+|----------|--------|
+| Where am I? | Phase 2 完成；Phase 3 (dalponte2016) 待启动 |
+| Where am I going? | Phase 3：抽 `src/C_dalponte2016.cpp`（126 行）→ `core/its/dalponte2016.{hpp,cpp}`，bindings 加 `_core.dalponte2016`，segmentation 接 `segment_dalponte2016`；要处理 seeds 形态 (M,3) / (M,4) 自动 ID 分配 |
+| What's the goal? | 把"CHM + 树顶 → 树冠 ID 栅格"这条 raster-out-raster 链路走通；为 Phase 4 silva2016 的同形 API 打地基 |
+| What have I learned? | Phase 2 关键经验：(a) `Shape` 适合放 `its/shape.hpp` 共用，避免算法 header 互相 include；(b) lmf CHM 分支走虚拟点云比手写 raster sweep 更省代码且与 lidR 行为一致；(c) lidR `filter_local_maxima` 的 `zmax` 是冗余变量但应保留以对齐行号；(d) `_validate.py` 的 `ensure_transform` 现已可用，dalponte/silva 直接复用；(e) `treetops_to_numpy_xyz` binding helper 已就绪，下一阶段 seeds 输入也按 `(M,3)`/`(M,4)` ndarray 收。 |
+| What have I done? | Phase 2 全部 5 sub-task + 11 测试，共 9 文件 created/modified。无 build 错误。Phase 1 之后无新 user gate。 |
 
 ## 5-Question Reboot Check (post Phase 1)
 

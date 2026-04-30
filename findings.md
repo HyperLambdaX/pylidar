@@ -115,14 +115,16 @@
 
 - **macOS Apple Clang 的 OpenMP shim 已在顶层 `CMakeLists.txt` 里。** 如果 Phase 1+ 引入 `#pragma omp` 后链接失败，问题大概率不在 shim 本身（`-Xpreprocessor -fopenmp -lomp` 已配好），而在算法 static lib 没继承 `OpenMP::OpenMP_CXX`。届时给 `pylidar_its` 加 `target_link_libraries(... PUBLIC OpenMP::OpenMP_CXX)`。
 - **scikit-build-core ≥ 0.12 严格执行 PEP 639。** SPDX `license = "..."` 与旧式 `License :: OSI Approved :: ...` classifier **不能共存**，构建会直接 fail。任何时候改 `pyproject.toml` 都别加 License classifier。
-- **本地 dev 装包流程（macOS arm64 已验）：**
+- **本地 dev 装包流程（macOS arm64 已验，uv-native）：**
   ```sh
-  uv venv --python 3.14 .venv
-  source .venv/bin/activate
+  # 首次：创建 venv + 装 editable wheel + test 依赖
+  uv venv --python 3.14
   uv pip install -e ".[test]"
-  pytest tests -m "not requires_fixture"
+
+  # 跑测试——不需要 source .venv/bin/activate，uv run 自己挑当前项目的 env
+  uv run pytest tests -m "not requires_fixture"
   ```
-  增量改 C++ 后用 `uv pip install -e ".[test]" --no-deps` 重装更快（不再 resolve 依赖，~3s）。
+  增量改 C++ 后只需 `uv pip install -e ".[test]" --no-deps` 重装（不再 resolve 依赖，~3s），然后 `uv run pytest ...`。`uv run` 本身不会触发 CMake 重建——所有 C++ 编译路径都走 `uv pip install -e`。Python-only 改动则可以直接 `uv run pytest`，省一步装包。
 - **`wheel.packages = ["python/pylidar"]` + `install(TARGETS _core LIBRARY DESTINATION pylidar)`** 的搭配让 nanobind 扩展落进 `pylidar/` 包目录。Phase 1+ 如果再加扩展或多 wheel target，确认 `DESTINATION` 仍是 `pylidar`，不要写成 `pylidar/_core/`。
 
 ### 测试与验证习惯
@@ -142,6 +144,24 @@
 - **MSVC 默认不带 `M_PI`**（要 `_USE_MATH_DEFINES`）。**用 `std::acos(-1.0)`** 在所有平台一行解决。
 - **OpenMP parallel for 的循环变量用 `std::ptrdiff_t`/有符号整型**，不要用 `size_t`。Apple Clang/GCC 都接受 unsigned，但 MSVC OpenMP 2.0 不行；为了 CI 三平台都过，统一有符号。
 - **算法库要直接 link `OpenMP::OpenMP_CXX`**，不能只靠顶层 `find_package`。Phase 1 改 `pylidar_its` 从 INTERFACE 升级到 STATIC 时同时把 OpenMP 加到 PUBLIC link——遗漏会导致 `#pragma omp parallel for` 在该 .cpp 里被静默忽略，单线程跑过测试，性能问题晚一截才暴露。
+
+### lmf 算法的几个端口注意点（Phase 2 抽出）
+
+- **lidR 的 raster-LMF 不是独立算法。** `locate_trees(<SpatRaster>, lmf(...))` 走的是 `R/locate_trees.R:106-148` 的 dispatch，先把 CHM 用 `raster_as_las()` 转成 1-point-per-cell 的伪 LAS，然后调同一个 `C_lmf`。pylidar 的 `lmf_chm` 在 C++ 端复刻这条路径——构造虚拟点云投给 `lmf_filter_impl`，与 `lmf_points` 共算法主体。**含义：** 不要去手写 raster sweep 风格的实现（即便它在 dense CHM 上更快）；统一走 kd-tree 路径才能 v0.2 fixture 对照仅做一次。
+- **从上游 LMF 主动偏离了两处（lmf.cpp 文件头有同样总结）：**
+  1. **Tie-break 改成确定性 `z == zi && j < i`。** lidR 内层 `if (z == zmax && filter[pt.id])` 是裸读全局 `filter`，与并行写无锁同步。两个邻居 z 完全相等时，输出取决于线程调度——本地实测 4 个等高点同窗，重复跑能拿到 1 / 4 / "最后一个" 三种结果。改成"最低索引赢"既单线程多线程一致，也与一次串行跑的结果完全相同。**不要**回到 race-y 版本以求"fixture parity"——lidR 自己的输出在那个 corner 里也是 non-deterministic 的，不存在能对齐的"参考值"。回归测试见 `test_lmf_points_tied_heights_are_deterministic`。
+  2. **删了 `state[j] = kNLM` 跨迭代写优化。** 上游靠它给"短邻居"打永久-NLM 标记好让外层迭代直接跳过。Tie-break 改确定性后这条写没算法价值，且本身是又一次跨迭代裸写。删掉以后每个外层迭代只写自己的 `filter[i_u]`（不同索引、并行安全），整个 parallel-for 完全 data-race-free，可以同时把 `#pragma omp critical` 去掉，并在见到 `z > zi` 时立即 `break`（之前不能 break 是因为还要继续打 NLM 标记）。
+- **`zmax` 在新版本里也删了。** lidR 的 `zmax = Z[i]` 永不更新，唯一用处是 race-y tie-break 的左操作数；我们既然换规则就直接去掉这个冗余变量，可读性更好。
+- **C++ 必须自己校验 hmin。** spec §6.4 明确：core/ 可被独立 link，bypass Python wrapper 时 hmin=NaN 会让 `zi >= hmin` 永为 false → 静默返回空集，与 Phase 1 size/sigma 同类陷阱。lmf 加了 `if (!std::isfinite(hmin)) throw std::invalid_argument(...)`。**模板：每个新算法的 C++ 入口对所有数值参数都要 `isfinite` 校验**，不能只信 Python wrapper。回归测试见 `test_lmf_core_rejects_nonfinite_hmin_directly[nan/inf/-inf]`。
+- **`if (!(zi >= hmin)) continue;` 同时挡 NaN z。** 双重否定让 NaN 也被排除（`NaN >= x` 是 false），无须额外 `isnan` 检查。算法里所有"过滤掉非有限值"的地方都用这个 idiom。
+- **CHM 像素坐标到世界坐标的约定。** `RasterView::world_x(c) = origin_x + c * pixel_size`，`world_y(r) = origin_y - r * pixel_size`（GIS 北上：row=0 是最大 y）。test_lmf_chm_three_peaks_transform_world_xy 是 reference。dalponte/silva 抽时记得复用 `RasterView` 这两 helper。
+
+### Phase 2 binding 模板（Phase 3+ 复用）
+
+- **(M, 3) 输出的标准 helper：** `module.cpp::treetops_to_numpy_xyz(std::vector<TreeTop>&&)` 已就绪，把 TreeTop POD 拷成 row-major (M,3) float64 numpy。下一阶段 dalponte/silva 接收 `seeds` 输入也走 `nb::ndarray<const double, nb::shape<-1, 3>, nb::c_contig>`（自定义 ID 时 (M,4)）。
+- **CHM 输入模板：** `nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>` + 三个独立 double（origin_x, origin_y, pixel_size）。binding 函数体内一次 `H·W` 嵌套循环复制到列主序 `Matrix2D<double>`。dalponte/silva 直接抄这段。
+- **`check_shape_int(int)` 已抽为共享。** 其他算法接收 shape 参数时复用，避免重复 `if (shape != 1 && shape != 2)`。
+- **`_validate.py::ensure_chm_float64` / `ensure_transform`** 已就绪可复用。
 
 ### lidR 上游的小 bug（Phase 1 撞到，纯供 fixture 生成时绕开）
 
