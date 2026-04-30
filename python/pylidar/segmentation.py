@@ -33,6 +33,7 @@ __all__ = [
     "locate_trees_lmf_chm",
     "locate_trees_lmf_points",
     "segment_dalponte2016",
+    "segment_silva2016",
     "smooth_height",
 ]
 
@@ -299,4 +300,86 @@ def segment_dalponte2016(
 
     return _core.dalponte2016(
         chm, ox, oy, ps, seeds, th_seed, th_cr, th_tree, max_cr
+    )
+
+
+def segment_silva2016(
+    chm: np.ndarray,
+    transform: Tuple[float, float, float],
+    seeds: np.ndarray,
+    max_cr_factor: float = 0.6,
+    exclusion: float = 0.3,
+) -> np.ndarray:
+    """Voronoi-tessellation tree-crown segmentation on a CHM (Silva 2016).
+
+    Direct port of lidR ``silva2016`` (``R/algorithm-its.R:203-283``).
+    silva2016 is a *pure-R* algorithm upstream — this is the first time
+    it's been written in C++. See ``docs/notes/silva2016-translation-trace.md``
+    (gitignored) for the line-by-line trace.
+
+    Algorithm: each non-NaN CHM cell joins the Voronoi cell of its nearest
+    seed (by world-XY Euclidean distance). For every group, ``hmax = max(Z)``
+    is the *Voronoi-cell* maximum (not the seed's own z). A cell is
+    labelled iff
+    ``Z >= exclusion * hmax`` *and* ``dist <= max_cr_factor * hmax``.
+
+    Parameters
+    ----------
+    chm : np.ndarray
+        (H, W) float64, C-contiguous, row-major. NaN cells are skipped
+        (output stays 0).
+    transform : tuple of (origin_x, origin_y, pixel_size)
+        Spec §6.1: ``origin_*`` is the world XY of pixel ``(row=0,
+        col=0)``; row 0 is the northern edge (largest y).
+    seeds : np.ndarray
+        ``(M, 3)`` float64 (x, y, z) — IDs auto-assigned 1..M; or
+        ``(M, 4)`` (x, y, z, id) for caller-supplied IDs. ``M == 0`` is
+        allowed and yields an all-zero crown raster (no warning emitted —
+        callers traversing batches can detect the result via
+        ``crowns.any()`` or ``len(seeds) == 0``).
+    max_cr_factor : float, default 0.6
+        Crown-radius cap as a fraction of hmax. Must be > 0 and finite.
+        No upper bound (matches lidR ``assert_all_are_positive``).
+    exclusion : float, default 0.3
+        Height-threshold lower bound as a fraction of hmax. Must lie in
+        the **open** interval ``(0, 1)`` — both 0 and 1 are rejected,
+        matching lidR ``assert_all_are_in_open_range``. Note this differs
+        from dalponte2016's ``th_seed``/``th_cr`` (closed ``[0, 1]``).
+
+    Returns
+    -------
+    np.ndarray
+        ``(H, W)`` int32 crown label raster. ``0`` = no tree (NaN cell,
+        no seeds, or thresholds failed); otherwise the seed ID.
+
+    Raises
+    ------
+    TypeError
+        If ``chm`` or ``seeds`` is not a numpy array, or its dtype is
+        not float64.
+    ValueError
+        On bad CHM/transform/seeds shape, ``max_cr_factor`` not
+        finite-positive, or ``exclusion`` outside the open interval
+        ``(0, 1)``.
+    """
+    chm = ensure_chm_float64(chm)
+    ox, oy, ps = ensure_transform(transform)
+    seeds = ensure_seeds_xyzid(seeds)
+
+    max_cr_factor = float(max_cr_factor)
+    exclusion     = float(exclusion)
+    if not math.isfinite(max_cr_factor) or max_cr_factor <= 0.0:
+        raise ValueError(
+            f"max_cr_factor must be a finite positive number, "
+            f"got {max_cr_factor}"
+        )
+    # Open interval — distinct from dalponte's closed [0, 1].
+    if not math.isfinite(exclusion) or not (0.0 < exclusion < 1.0):
+        raise ValueError(
+            f"exclusion must lie in the open interval (0, 1), "
+            f"got {exclusion}"
+        )
+
+    return _core.silva2016(
+        chm, ox, oy, ps, seeds, max_cr_factor, exclusion
     )

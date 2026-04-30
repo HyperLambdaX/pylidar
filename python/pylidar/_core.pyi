@@ -90,3 +90,23 @@ def dalponte2016(
     Use :func:`pylidar.segment_dalponte2016` instead.
     """
     ...
+
+def silva2016(
+    chm: npt.NDArray[np.float64],
+    origin_x: float,
+    origin_y: float,
+    pixel_size: float,
+    seeds: npt.NDArray[np.float64],
+    max_cr_factor: float,
+    exclusion: float,
+) -> npt.NDArray[np.int32]:
+    """Internal: silva2016 Voronoi-tessellation tree-crown segmentation.
+
+    Caller passes a row-major (H, W) float64 CHM, an unpacked
+    (origin_x, origin_y, pixel_size) triple, and a (M, 4) float64
+    seeds array (columns: x, y, z, id_as_double). Returns (H, W) int32
+    crown labels (0 = no tree).
+
+    Use :func:`pylidar.segment_silva2016` instead.
+    """
+    ...

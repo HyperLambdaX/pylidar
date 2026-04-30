@@ -26,6 +26,7 @@
 #include "its/dalponte2016.hpp"
 #include "its/lmf.hpp"
 #include "its/shape.hpp"
+#include "its/silva2016.hpp"
 #include "its/smooth_height.hpp"
 
 namespace nb = nanobind;
@@ -287,6 +288,75 @@ nb::ndarray<nb::numpy, std::int32_t, nb::ndim<2>> bind_dalponte2016(
         buf, {H, W}, std::move(owner));
 }
 
+// _core.silva2016 — internal entry point. Public API:
+// pylidar.segment_silva2016 (segmentation.py), which validates inputs and
+// packs (M, 3) seed arrays into (M, 4) by auto-assigning IDs 1..M. Same
+// CHM / seeds plumbing as bind_dalponte2016; only the scalar parameters
+// differ (max_cr_factor, exclusion). Returns (H, W) int32 row-major
+// label raster (0 = no tree).
+nb::ndarray<nb::numpy, std::int32_t, nb::ndim<2>> bind_silva2016(
+    nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>
+                chm,
+    double      origin_x,
+    double      origin_y,
+    double      pixel_size,
+    nb::ndarray<const double, nb::shape<-1, 4>, nb::c_contig,
+                nb::device::cpu>
+                seeds,
+    double      max_cr_factor,
+    double      exclusion) {
+    const std::size_t H = chm.shape(0);
+    const std::size_t W = chm.shape(1);
+    const double*     chm_src = chm.data();
+
+    pylidar::common::RasterView<double> rv;
+    rv.data       = pylidar::common::Matrix2D<double>(H, W);
+    rv.origin_x   = origin_x;
+    rv.origin_y   = origin_y;
+    rv.pixel_size = pixel_size;
+
+    // Row-major numpy → column-major Matrix2D, single O(H·W) pass.
+    for (std::size_t r = 0; r < H; ++r) {
+        const double* row_ptr = chm_src + r * W;
+        for (std::size_t c = 0; c < W; ++c) {
+            rv.data.at(r, c) = row_ptr[c];
+        }
+    }
+
+    // Pack seeds → vector<TreeTop>. Layout: (x, y, z, id_as_double).
+    const std::size_t M       = seeds.shape(0);
+    const double*     seed_src = seeds.data();
+    std::vector<pylidar::common::TreeTop> tops;
+    tops.reserve(M);
+    for (std::size_t i = 0; i < M; ++i) {
+        pylidar::common::TreeTop t;
+        t.x  = seed_src[i * 4 + 0];
+        t.y  = seed_src[i * 4 + 1];
+        t.z  = seed_src[i * 4 + 2];
+        t.id = static_cast<std::int32_t>(seed_src[i * 4 + 3]);
+        tops.push_back(t);
+    }
+
+    pylidar::common::Matrix2D<std::int32_t> result;
+    {
+        nb::gil_scoped_release release;
+        result = pylidar::its::silva2016(
+            rv, tops, max_cr_factor, exclusion);
+    }
+
+    auto* buf = new std::int32_t[H * W];
+    for (std::size_t r = 0; r < H; ++r) {
+        for (std::size_t c = 0; c < W; ++c) {
+            buf[r * W + c] = result.at(r, c);
+        }
+    }
+    nb::capsule owner(buf, [](void* p) noexcept {
+        delete[] static_cast<std::int32_t*>(p);
+    });
+    return nb::ndarray<nb::numpy, std::int32_t, nb::ndim<2>>(
+        buf, {H, W}, std::move(owner));
+}
+
 }  // namespace
 
 NB_MODULE(_core, m) {
@@ -351,5 +421,19 @@ NB_MODULE(_core, m) {
         nb::arg("max_cr"),
         "Internal: dalponte2016 CHM region-growing segmentation. Use "
         "pylidar.segment_dalponte2016 instead — it validates inputs and "
+        "auto-assigns IDs to (M,3) seed arrays.");
+
+    m.def(
+        "silva2016",
+        &bind_silva2016,
+        nb::arg("chm"),
+        nb::arg("origin_x"),
+        nb::arg("origin_y"),
+        nb::arg("pixel_size"),
+        nb::arg("seeds"),
+        nb::arg("max_cr_factor"),
+        nb::arg("exclusion"),
+        "Internal: silva2016 Voronoi-tessellation tree-crown segmentation. "
+        "Use pylidar.segment_silva2016 instead — it validates inputs and "
         "auto-assigns IDs to (M,3) seed arrays.");
 }

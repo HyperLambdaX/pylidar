@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 3 — dalponte2016（完成，待 commit / Phase 4 启动）
+Phase 4 — silva2016（完成，待 commit / Phase 5 启动）
 
 ## Reference Documents
 
@@ -67,16 +67,17 @@ Phase 3 — dalponte2016（完成，待 commit / Phase 4 启动）
 - [x] `tests/test_dalponte2016.py`（18 case：5 task_plan 必需 + seeds dtype/shape / empty seeds / 越界 seed / NaN cells / th_seed&th_cr 越界 parametrize / max_cr ≤ 0 / id=0 拒绝 / max_cr 紧约束生效 / int32 输出 dtype）
 - [x] **Acceptance**：本机 `pytest tests -m "not requires_fixture"` = 51 passed, 1 skipped（Phase 0 占位 Matrix2D 仍 skip）
 - **Status:** complete
+- **Deferred fixes（2026-04-30 user audit；Phase 8 一并合入）**：见 `findings.md` "Phase 3 dalponte2016 已确认偏离 / Deferred fixes" 5 条（D1a 非整 ID 截断 / D1b int32 范围 / **D1c 重复 ID 静默破坏 high** / **D2 (M,3) auto-ID 顺序 high** / D3 lround 越界）。
 
 ### Phase 4: silva2016（**R→C++ 翻译，最高风险 phase**）
 
-- [ ] 先写 `docs/notes/silva2016-translation-trace.md`（工作笔记，行号对照 R/algorithm-its.R 第 203-325，gitignored）
-- [ ] **GATE：用户审阅翻译笔记后再提交代码**（mid-phase user review，因风险高）
-- [ ] `src/core/its/silva2016.{hpp,cpp}`
-- [ ] bindings + segmentation.py
-- [ ] `tests/test_silva2016.py`（5 case：双树对比 dalponte 更保守 / 高度差大 exclusion 生效 / max_cr_factor 极大 / 单 seed / exclusion=0）
-- [ ] **Acceptance**：5 测试全过 + 翻译笔记被用户 ack
-- **Status:** pending
+- [x] 先写 `docs/notes/silva2016-translation-trace.md`（工作笔记，行号对照 R/algorithm-its.R 第 203-283，gitignored）
+- [x] **GATE：用户审阅翻译笔记后再提交代码**（user 审阅 6 decision 后 ack）
+- [x] `src/core/its/silva2016.{hpp,cpp}`（三趟：parallel KNN → serial hmax → parallel write；nearest_idx int32 + -1 哨兵；seeds bbox 预过滤）
+- [x] bindings + segmentation.py（`bind_silva2016` + `segment_silva2016`，CHM/seeds 包装与 `bind_dalponte2016` 同形）
+- [x] `tests/test_silva2016.py`（27 case：5 task_plan 必需 + 21 extras + 1 D2 xfail）
+- [x] **Acceptance**：本机 `pytest tests -m "not requires_fixture"` = 85 passed, 1 skipped, 1 xfailed（D2 deferred-fix pin）；翻译笔记被用户 ack
+- **Status:** complete
 
 ### Phase 5: li2012（**最复杂，从 1795 行 LAS.cpp 抽算法**）
 
@@ -108,7 +109,8 @@ Phase 3 — dalponte2016（完成，待 commit / Phase 4 启动）
 - [ ] `.github/workflows/generate_fixtures.yml`（`workflow_dispatch`，装 R+lidR，跑脚本，create-pull-request 提 PR）
 - [ ] phase 1-6 已有 pytest 文件加 `@pytest.mark.requires_fixture` 的对照测试
 - [ ] `pytest.ini` 加 markers + 默认 `addopts = "-m 'not requires_fixture'"`
-- [ ] **Acceptance**：手动触发 workflow → 得到 PR → merge 后 `pytest tests -m requires_fixture` 全过
+- [ ] **Phase 3 deferred fixes（D1a/D1b/D1c/D2/D3）一并合入**：D2 + D1c 是高优；其余顺手。详见 `findings.md` "Phase 3 dalponte2016 已确认偏离" 节
+- [ ] **Acceptance**：手动触发 workflow → 得到 PR → merge 后 `pytest tests -m requires_fixture` 全过；Phase 3 deferred fixes 5 条全部合入并各自有回归 test
 - **Status:** pending
 
 ## Key Questions

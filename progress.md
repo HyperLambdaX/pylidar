@@ -123,9 +123,64 @@
 - Test design 经验：手算 expected crown 时第一版的 ring=6 在 z=12 peak 处 fail (`6 > 12 * 0.55 = 6.6` false)；改 ring=7 后两 peak 都过。lidR 默认 `th_cr=0.55` 实际上对 peak height 与 ring height 之比有强约束（ring/peak > 0.55），后续 fixture 对照测时合成数据要照此设计。
 - C++ 直调入口未单独写测试（不像 Phase 1/2 给 size/sigma/hmin 加了 NaN 直调测试）：dalponte2016 的所有 invariant 都在 Python 层先校验，且无线程并发逻辑——直调测试与 Python 测试 100% 重叠。
 
-### Phase 4-8
+### Phase 3 audit（post-完成，2026-04-30）
+
+- 用户提出 3 个 concern，全部读源码核实成立，归档为 deferred fixes（user 决策：不阻塞 Phase 4，Phase 8 fixture 阶段一并合入）。详见 `findings.md` "Phase 3 dalponte2016 已确认偏离 / Deferred fixes" 节。
+- 5 条 issue 摘要：
+  1. **D1a** `_validate.ensure_seeds_xyzid` 不查 ID 整数性 → `id=1.9` 截断成 1（medium）
+  2. **D1b** 不查 int32 上界 → 负向越界可能 mod-wrap 后通过 `<1` 校验（medium，不可移植）
+  3. **D1c** 不查重复 ID → 两 seed 同 id 时第二个覆盖前者的 `seed_px/sum_height/npixel`，第一个 seed 的像素脱离 bookkeeping，半幽灵 crown；lidR `check_tree_tops` 显式 `stop("Duplicated tree IDs found.")`（**high**）
+  4. **D2** (M,3) auto-ID 在 Python 层先编 1..M 再让 C++ 静默丢越界 seed；lidR 是先 crop 后编号；前 N 个越界时 crown 标签会差一个 offset，Phase 8 fixture 必偏（**high**）
+  5. **D3** `dalponte2016.cpp:110-116` 对超大 finite 坐标先 `lround` 再 cast 是 unspecified/implementation-defined，应先在 double 域做边界比较再 cast（low）
+- task_plan.md Phase 3 / Phase 8 章节已加 deferred-fix 引用。
+
+### Phase 4: silva2016
+
+- **Status:** complete（2026-04-30）
+- User decision（mid-phase gate；6 项均 ack 见 docs/notes/silva2016-translation-trace.md §5）：
+  1. 签名不暴露 `ID` 列名参数（id 固定 (M,4) 第 4 列）—— OK
+  2. 0 seed 不 emit warning（pylidar 风格优先于 lidR strict parity）—— user 授权由我决定，选不 emit
+  3. OpenMP 三趟（parallel KNN → serial hmax → parallel write）—— OK
+  4. `nearest_idx` 用 int32 + `-1` 哨兵 —— OK
+  5. (M,3) auto-ID 与 D2 共病：Phase 4 内不修，加 `xfail(strict=True)` 测试钉住偏离 —— OK
+  6. `hmax` = Voronoi cell 内 max Z（非 seed.z）—— OK，与 R 端 `chmdt[, hmax := max(Z), by = id]` 字面对齐
+- 关键算法选择（per docs/notes/silva2016-translation-trace.md，无新 user gate）：
+  - **三趟实现** vs lidR 单趟 `data.table` chained assigns：算法上等价（hmax 是 group reduce，与 cell 顺序无关；threshold 是 cell-local），三趟在 OpenMP 下天然 race-free。第 2 趟 hmax 累积串行（O(H·W) memory sweep，cache-friendly；并行需要 user-defined reduction 或 per-thread arrays）。
+  - **比较算子 `>=`/`<=` 严格保留**（R 行 272 `Z >= exclusion*hmax & d <= max_cr_factor*hmax`）。dalponte 是 `>`/`<` 严格 —— **两算法不"统一"**。
+  - **`exclusion ∈ (0, 1)` 开区间** vs dalponte `[0, 1]` 闭区间。Python wrapper 与 C++ 端各自 enforce，user 拿到 ValueError 而非任意行为。
+  - **seeds bbox 预过滤** 复刻 lidR `crop_special_its`（sf::st_crop）：算法首部按 chm bbox + 0.5-pixel 半-skirt 丢越界 seed；filter 包含 `isfinite` 自查（spec §6.4 core 独立 link 时的不变量）。
+  - **D2 共病** 通过 `tests/test_silva2016.py::test_silva_M3_first_seed_outside_bbox_crown_label_matches_lidR` 用 `pytest.mark.xfail(strict=True)` 钉住：当前实现给 crown label=2，lidR-correct 是 label=1。Phase 8 修 D2 后此测试会 XPASS，pytest 在 strict 模式下报错，提示 dev 删除 marker。
+- Files created/modified:
+  - `src/core/its/silva2016.{hpp,cpp}`（创建；~190 行 .cpp，文件头详细说明三趟 + 关键 R↔C++ 对应）
+  - `src/core/its/CMakeLists.txt`（silva2016.cpp 加入 STATIC lib）
+  - `src/bindings/module.cpp`（加 `bind_silva2016` + `m.def("silva2016", ...)`，CHM/seeds 包装与 dalponte 同形）
+  - `python/pylidar/segmentation.py`（加 `segment_silva2016`，open-interval exclusion 校验自家 enforce）
+  - `python/pylidar/__init__.py`（re-export `segment_silva2016`）
+  - `python/pylidar/_core.pyi`（加 `silva2016` 存根）
+  - `tests/test_silva2016.py`（创建；27 case：5 task_plan 必需 + 21 extras + 1 D2 xfail）
+  - `docs/notes/silva2016-translation-trace.md`（gitignored，user-reviewed mid-phase；保留作 Phase 8 fixture 对照查阅）
+  - `.gitignore`（加 `docs/notes/` 排除）
+- Acceptance：`uv pip install -e ".[test]" --no-deps`（macOS arm64 / py3.14.2）成功；`uv run pytest tests -m "not requires_fixture"` = **85 passed, 1 skipped, 1 xfailed**。
+- 中途 debug：(M,3) auto-ID test 与 (M,4) custom-ID test 第一次 assert 写错 —— 我以为 default thresholds 下会有 0 cell，实际是 `5 >= 0.3*10 = 3` 全过 + `dist ≤ 0.6*10 = 6` 全过 → 全 raster 被标 → unique={1,2} 而非 {0,1,2}。算法行为正确，断言写错。修一行 fix，复跑过。
+- **User 2026-04-30 review（Phase 4 完成后）**：发现 4 条问题——
+  1. D2 同时影响 dalponte + silva 的 fixture parity；findings.md D2 标"两算法共病"，Phase 8 优先修。
+  2. D1c 的 silva 路径行为与 dalponte 不同（KNN 按 position 独立 hmax；写 result 时 collide 到同一 user id），findings.md D1c 补 silva 路径描述。
+  3. D1a/D1b 的修法（`ids == trunc(ids)` + `[1, INT32_MAX]`）与 user 建议一致，findings.md "修法" 行加 "user review 已确认"。
+  4. **silva.hpp 文档说 throw 但 impl 是 silent continue**——这是 Phase 4 我刚写的代码里 doc-vs-impl 不一致，**不属于 deferred fixes**。fix：`silva2016.cpp` 改 `throw std::invalid_argument`（与 hpp 契约 + Phase 1/2 模板 + spec §6.4 self-check 一致）；test_silva2016 加 4 个 NaN/Inf seed XY 直调 parametrize 测试。dalponte 的 hpp doc 写明 silent drop，impl 一致，未动。本机 acceptance：**89 passed, 1 skipped, 1 xfailed**（Phase 4 +4 case from #4 fix）。
+
+### Phase 5-8
 
 - **Status:** pending（详见 task_plan.md）
+
+## 5-Question Reboot Check (post Phase 4)
+
+| Question | Answer |
+|----------|--------|
+| Where am I? | Phase 4 完成（silva2016）；Phase 5 (li2012) 待启动 |
+| Where am I going? | Phase 5：从 lidR `LAS::segment_trees`（嵌入 1795 行 src/LAS.cpp 的方法）抽算法主体，nanoflann KDTree2D 替代 LAS 内嵌索引；先读 LAS.cpp 整文件，标注私有字段/方法依赖，写 findings.md "li2012 LAS dependency map"。这是计划里"最复杂的抽取 phase"。 |
+| What's the goal? | 把"点云 + hmin → 树 ID 标签"的纯点云分割算法迁过来；输出与 dalponte/silva 不同——不是 (H,W) raster 而是 (N,) int32 per-point label。spec §7 已锁定接口形态。 |
+| What have I learned? | Phase 4 关键经验：(a) 三趟 KNN → serial hmax → parallel write 模式天然 race-free，比 OpenMP user-defined reduction 简单很多；后续 li2012 若需要 per-cluster 累积也可同模板。(b) silva 与 dalponte 表面接口几乎一致（CHM + seeds → int32 raster），但比较算子（`>=`/`<=` vs `>`/`<`）和 exclusion 区间（开 vs 闭）不能"统一"——直译比"看起来更干净"安全。(c) `bind_silva2016` 与 `bind_dalponte2016` 重复了 ~50 行 CHM/seeds 包装代码；下次要不要抽 helper 看 li2012 是否也走 (H,W) 路径——它走点云路径，不会再加重复，所以本次不抽。(d) `pytest.mark.xfail(strict=True)` 是钉 deferred-fix divergence 的好工具：当前 fail = XFAIL（OK），未来 D2 修好后 unexpected pass = XPASS（fail run，提示删 marker）。 |
+| What have I done? | Phase 4 全部 5 sub-task + 27 测试，共 8 文件 created/modified（含 .gitignore + docs/notes 工作笔记）。无 build 错误，无 race condition，1 个 algorithm-correct 但 test-assertion-错的中途修。 |
 
 ## 5-Question Reboot Check (post Phase 3)
 

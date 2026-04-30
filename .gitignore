@@ -36,3 +36,6 @@ compile_commands.json
 
 # Pytest
 .pytest_cache/
+
+# Per-phase R→C++ translation working notes (user-reviewed mid-phase but not committed)
+docs/notes/

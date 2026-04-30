@@ -144,6 +144,103 @@
 | 7 | seeds[:, 2] z 列忽略 | known, doc 缺 | Phase 4 顺手补 docstring |
 | 8 | `th_tree=0` 全连通增长 | unverified | low pri |
 
+### Phase 3 dalponte2016 已确认偏离 / Deferred fixes（2026-04-30 audit）
+
+与上节 "未验证假设"（自己想到但没跑 lidR 验证）不同，下面这 5 条是**用户提出 + 我读源码核对后已确认**的偏离/不健壮，归档到 Phase 8 与 fixture 修复一并合入（user 决策：不阻塞 Phase 4 启动）。
+
+#### D1. (M,4) seeds ID 校验薄弱（3 子项）
+
+代码：`python/pylidar/_validate.py:148-161`、`src/bindings/module.cpp:265`、`src/core/its/dalponte2016.cpp:120-123`
+
+- **D1a — 非整数 ID 静默截断**：`ids.astype(np.int32)` 与 binding 端 `static_cast<std::int32_t>(seed_src[i*4+3])` 都做截断，`id=1.9` → 输出 crown 标 1；校验只看 `ids_int < 1`，看不到小数。
+- **D1b — int32 范围未上界检查**：`astype(np.int32)` 对越界 float 行为依平台/numpy 版本（多半 mod-wrap 到负），`<1` 检查恰好挡住**正向**越界（如 `2^31`）；但**负向**越界（如 `-(2^31+1)`）可能 wrap 成正数后通过校验。不可移植。
+- **D1c — 重复 ID 静默破坏 bookkeeping（最严重）**：两条算法路径偏离 lidR 的方式不同，但都偏离。
+  - **dalponte 路径**（`dalponte2016.cpp:120-123`）：
+    ```cpp
+    region.at(r_u, c_u) = s.id;
+    seed_px[s.id]    = SeedPx{row_i, col_i, s.id};
+    sum_height[s.id] = image.at(r_u, c_u);
+    npixel[s.id]     = 1;
+    ```
+    两个 seed 同 id 时后写者覆盖三个 map；增长阶段所有该 id 的像素都按**第二个 seed 的位置**算 `h_seed` 和 Chebyshev 距离。第一个 seed 的位置仍写入 `region` 但脱离 bookkeeping，半幽灵 crown。
+  - **silva 路径**（`silva2016.cpp` Pass 1-3，user 2026-04-30 review 补充）：KNN 按 `valid_seeds` 中的 position（0..M-1）找最近 seed；`hmax[i]` 按 position 独立累积；Pass 3 写 `result.at(r, c) = valid_seeds[i].id` 用 user id。两个 seed 同 user id 时：两个 Voronoi group 各自独立计算 hmax + 各自做阈值过滤，但最终都被标成同一个 user id。**净效果 = "两 group 独立筛选后合并为同一 label"**，与 dalponte 的 "bookkeeping 覆盖" 语义不同（silva 不丢任何 group 的 hmax）。
+  - **共同**：lidR `check_tree_tops`（`R/algorithm-its.R:489-490`）显式 `stop("Duplicated tree IDs found.")`，pylidar 两处都不查。
+
+**修法**（user 2026-04-30 review 已确认）：`ensure_seeds_xyzid` (M,4) 分支加 (i) `np.any(ids != np.trunc(ids))` 抛 ValueError、(ii) 显式比较 `[1, np.iinfo(np.int32).max]` 范围、(iii) `len(np.unique(ids)) < len(ids)` 抛 ValueError。一处校验同时为 dalponte + silva 兜底。
+
+#### D2. (M,3) auto-ID 顺序与 lidR 不一致（**dalponte + silva 共病**）
+
+> user 2026-04-30 review 强调：D2 同时影响 dalponte2016 和 silva2016 的 fixture parity（两者都共享 `_validate.ensure_seeds_xyzid` 的 (M,3) auto-ID 逻辑）。Phase 8 fixture 阶段**优先**修。silva 这边已用 `tests/test_silva2016.py::test_silva_M3_first_seed_outside_bbox_crown_label_matches_lidR` (`xfail(strict=True)`) 钉住偏离；dalponte 没钉，Phase 8 修复时一并补回归测试。
+
+
+代码：`python/pylidar/_validate.py:141-145`、`src/core/its/dalponte2016.cpp:106-117`、对比 `R/algorithm-its.R:101-122`。
+
+- 当前：Python 层 `out[:, 3] = np.arange(1, m+1)` 先编号；C++ 再 `if (row_i < 0 ...) continue` 静默丢越界 seed。
+- lidR：`crop_special_its` → `treetops[["SEQUENTIALIDTREE"]] <- 1:nrow(treetops)`，**先 crop 后编号**。
+- 反例：5 seed，前 2 越界。lidR 输出 crown 标签 = {1,2,3}；pylidar 输出 = {3,4,5}。Phase 8 fixture 100% 会偏。
+
+**修法**：(M,3) auto-ID 推迟到 C++。两条路径选一：
+- (a) Python 层 (M,3) 分支补 sentinel id（如 0），binding/C++ 看见全 0 走 auto-ID 路径，rasterize-and-drop 后按落点顺序分配 1..N'。
+- (b) 拆两个 binding 入口 `_core.dalponte2016` (M,4 用户 ID) vs `_core.dalponte2016_auto_id` (M,3)。
+
+(a) 接口面积更小但有"魔法 sentinel"；(b) 显式但 binding 翻倍。动手前与用户确认。
+
+#### D3. lround/int cast 对超大 finite 坐标的不规范行为
+
+代码：`src/core/its/dalponte2016.cpp:110-116`
+
+- `std::lround(double)` 对结果超 `long` 范围的输入是 **unspecified**（C++17 [c.math.lround]）；后续 `static_cast<int>(long)` 越界是 **implementation-defined**（C++17，C++20 才规定为 mod-2^N）。
+- `s.x = 1e20`（finite 但巨大）这种输入会走进未指定分支；后续 `< 0 || >= nrow` bounds check 不能保证捕获。
+- 现实影响小（UTM 坐标 O(1e7)）；但 spec §6.4 承诺 C++ 可独立 link 时全数自查。
+
+**修法**：先在 double 域做边界比较再 cast：
+```cpp
+if (col_d < -0.5 || col_d >= static_cast<double>(ncol) - 0.5) continue;
+if (row_d < -0.5 || row_d >= static_cast<double>(nrow) - 0.5) continue;
+const int col_i = static_cast<int>(std::lround(col_d));   // 此时一定在 int 范围
+```
+
+#### Deferred-fix 追踪表
+
+| # | Issue | Severity | 修法 |
+|---|-------|----------|------|
+| D1a | 非整 ID 截断 | medium | `ids != trunc(ids)` 校验 |
+| D1b | int32 范围不查 | medium | `[1, INT32_MAX]` 显式范围检查 |
+| D1c | 重复 ID 静默破坏 | **high** | `unique` 校验，lidR-aligned |
+| D2  | (M,3) auto-ID 顺序 | **high** | auto-ID 推迟到 C++，落点后编号；接口设计待 user 决定 |
+| D3  | lround 越界不规范 | low | double-domain 边界检查后再 cast |
+
+**进 Phase 8 时**：D2 + D1c 必须先修（fixture 对照会暴露），D1a/D1b/D3 顺手合一起。每条加 1-2 个回归 test（重复 ID 抛 / 非整 ID 抛 / 前 2 seed 越界时 (M,3) 输出标签为 1..3 / 巨大 finite XY 不 segfault 不被错误标号）。
+
+### Phase 4 silva2016 未验证假设（2026-04-30 ack 后实施）
+
+silva2016 是**唯一的纯 R → C++ 翻译**（其他算法都有上游 C++ 入口可对照）。合成测试 27 case 覆盖了主要语义，但下面这些"我们的实现选了一个路径、lidR 大概率走同一路径但我没跑过"的边界没单独验。Phase 8 装好 R+lidR 跑 silva2016 时优先核。
+
+| # | 假设 | 当前行为 | 推测 lidR 行为 | Phase 8 验证 |
+|---|------|----------|---------------|-------------|
+| S0 | ~~silva.hpp doc 说 throw 但 impl 是 silent continue~~ | **resolved** 2026-04-30 user review | impl 改为 `throw std::invalid_argument`；hpp 契约不变；test_silva2016 加 4 个 NaN/Inf seed XY 直调 parametrize 测试钉住。dalponte 的 doc 没承诺 throw（只说 silent drop），impl 行为一致，**未动**。 |
+| S1 | KNN tie-break（两 seed 等距） | nanoflann 默认（实测倾向 lower-index） | lidR `C_knn` 用 GridPartition，tie 行为依索引数据结构内部顺序 | fixture 造 cell 等距两 seed，对照 crown label |
+| S2 | 空 Voronoi group 的 hmax | 留 `-inf`，threshold = `-inf`，crown 空 | 不可达：seed 通过 crop 后必有 ≥1 cell（除非全 NaN raster） | low pri，几何上不太可能触发 |
+| S3 | `exclusion = nextafter(0)` / `nextafter(1)` | 通过 open-interval 校验，threshold 极端 | lidR 同（但 R 端 `assert_all_are_in_open_range` 比较语义可能微差） | low pri |
+| S4 | `hmax` 是 Voronoi cell max 而非 seed.z | Voronoi cell max（直译 R `chmdt[, hmax := max(Z), by = id]`） | lidR 同 | 高优；fixture 用一个 seed 不在最高 cell 上的 case 测 |
+| S5 | 距离比较的 sqrt 舍入 | `dist = sqrt(sq_d)` 后比 `max_cr_factor*hmax` | lidR `C_knn` 也返回 `sqrt(dx²+dy²)` | low pri，浮点 toolchain 一致即对齐 |
+| S6 | bbox 边界点（`s.x == xmin` 等）保留 | 闭区间 `<= / >=` 保留 | lidR `sf::st_crop` 也保留边界 | low pri |
+| S7 | seed 在 NaN cell 上 | KNN 仍工作（seed 不在 chm 中读 z）；该 cell 不进 group | lidR 同；NaN cell 在 `na.rm=TRUE` 时已 drop | low pri |
+| S8 | 多 seed 同 user id（D1c 共病） | 重复 id 多 seed 各自参与 KNN（nearest_seed_idx 记 valid_seeds 中位置），但写 result 时同 id 多 seed 的 cell 都标同一 id；hmax 各 group 独立 | lidR `check_tree_tops` 直接 `stop("Duplicated tree IDs found.")`，不会跑到这里 | Phase 8 修 D1c 后 silva 也受益，无需单独验 |
+
+### Phase 4 silva2016 关键 R↔C++ 行号对照（保留以备 Phase 8 fixture 对账）
+
+完整对照见 `docs/notes/silva2016-translation-trace.md`（gitignored 工作笔记），核心几行：
+
+| R 行号 | R 代码 | C++ 对应 |
+|--------|--------|----------|
+| `R/algorithm-its.R:240` | `res <- crop_special_its(treetops, chm, bbox)` | `silva2016.cpp` 算法首部 valid_seeds 过滤（按 chm bbox + 0.5-pixel skirt） |
+| `:257` | `chmdt <- raster_as_dataframe(chm, xy=FALSE, na.rm=TRUE)` | Pass 1 嵌套循环里 `if (!std::isfinite(v)) continue` |
+| `:264` | `u <- C_knn(coords[,1], coords[,2], chmdt$X, chmdt$Y, 1L, ncpu)` | nanoflann KDTree2D `findNeighbors(rs, query, ...)`，0-based idx |
+| `:267-270` | `chmdt[, id := ids[u$nn.idx[,1]]]; d := dist; hmax := max(Z) by id` | nearest_idx + cell_dist 矩阵 + `hmax[i] = max(...)` Pass 2 |
+| `:272` | `chmdt[Z >= exclusion*hmax & d <= max_cr_factor*hmax]` | `if (v >= exclusion * h && d <= max_cr_factor * h)` Pass 3，注意 **`>=` / `<=` 闭** |
+| `:275-277` | `crown <- raster_set_values(crown, NA_integer_); crown <- raster_set_values(crown, ids, cells)` | `result.at(r, c) = valid_seeds[i].id`，`Matrix2D<int32>` 默认 0 = "no tree" 哨兵
+
 ## Risks（spec §13，实施时关注）
 
 - silva2016 R→C++ 翻译可能引入语义偏差 → Phase 4 mid-phase 用户审翻译笔记 + v0.2 fixture 容差兜底
@@ -247,6 +344,30 @@
 - **`data + size` 在 `data=nullptr, size=0` 时是 UB**（C++17 [expr.add]：指针算术要求 P 指向数组元素或末尾，nullptr 不指向任何数组）。GCC/Clang/MSVC 实践上不出怪事，但 `-fsanitize=undefined` 会标红。
 - **修法**：`end()` 写 `return size ? data + size : data;`——空时直接返 `data`，避免对空指针做加法。`begin()` 不需要改（直接返 `data` 没算术）。
 - 后续算法用 `Span<T>{}` 表示空入参时不会被这条坑到。
+
+### silva2016 / 三趟 OpenMP 模式（Phase 4 抽出）
+
+- **三趟实现 (parallel KNN → serial reduce → parallel write) 是处理 per-group reduce 的最简模式。** silva2016 的 `hmax := max(Z), by = id` 是 group-by max；OpenMP 4.5+ 才支持数组 reduction，且要求长度编译期已知；用户自定义 reduction 复杂度高。三趟法第 1/3 趟天然 race-free（每个 cell 写自己的 scratch slot），第 2 趟串行扫一次内存（无算术）。后续 li2012 的 cluster 累积、metrics 的 stats 计算遇到同模板都可复用。
+- **`Matrix2D<int32_t>` 不是默认 -1 init**——`Matrix2D` 构造器 zero-init（`new T[n]()`）。需要 `-1` 作 sentinel（如 silva 的 `nearest_idx`）必须显式嵌套循环 init，**不要**写 `std::memset(buf, -1, ...)`（仅对 char 安全；int32 的 `-1` byte pattern 是 0xFFFFFFFF，巧合相等，但模板的可移植代价不值）。
+- **nanoflann KNN k=1 的 idiom（与 Phase 1/2 的 radiusSearch 互补）**：
+  ```cpp
+  std::uint32_t idx;
+  double sq_d;
+  nanoflann::KNNResultSet<double, std::uint32_t> rs(1);
+  rs.init(&idx, &sq_d);
+  tree.findNeighbors(rs, query, nanoflann::SearchParameters{});
+  // sq_d 是平方距离，dist = sqrt(sq_d)
+  ```
+  默认 `IndexType = uint32_t`（与 radiusSearch 一致）；返回 0-based 索引（与 lidR `C_knn` 的 1-based 不同——lidR 在 RcppFunction.cpp:489 手动 `+1`）。
+- **CHM 像素中心 → 世界 XY 用 `chm.world_x(c)` / `chm.world_y(r)`**。Phase 2 的 lmf_chm 已经在用，silva 直接复用。`world_y(r) = origin_y - r * pixel_size`（GIS 北上）——**不要**写成加号。
+- **比较算子在不同算法间不要"统一"**。silva `>=` / `<=`（含等号）；dalponte `>` / `<` 严格；lmf `>` 严格；smooth_height circular 用 `dist <= radius` 含等号、square 用 `abs(dx) <= half_size` 含等号。每条都对应上游 lidR 的字面比较，"清理统一"会引入静默偏离。
+
+### `pytest.mark.xfail(strict=True)` 钉 deferred-fix divergence（Phase 4 抽出）
+
+- **用法**：当一个已知偏离暂不修但需要钉住"未来某 phase 修好后要回头去除 marker"的 reminder 时，写一个 lidR-correct 的 assert + `@pytest.mark.xfail(strict=True, reason=...)`。
+- **当前**：assert fail（pylidar 行为 != lidR 行为）→ XFAIL（pass run，OK）。
+- **未来修好后**：assert pass → XPASS；`strict=True` 让 XPASS 变成 fail，dev 必须删 marker 才能 green。
+- **典型 case**：Phase 3 D2（M,3 auto-ID 顺序）通过 `tests/test_silva2016.py::test_silva_M3_first_seed_outside_bbox_crown_label_matches_lidR` 钉。Phase 5+ 类似的"已知偏离待 fixture 阶段修"的 case 都用同一 pattern。
 
 ### Python 包装层模式（Phase 1 抽出）
 
