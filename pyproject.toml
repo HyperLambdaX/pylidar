@@ -1,0 +1,83 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pylidar"
+version = "0.1.0"
+description = "Individual tree segmentation algorithms ported from R lidR to a standalone C++17 + Python package"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [
+    { name = "HyperLambdaX", email = "yinleipine@gmail.com" },
+]
+dependencies = [
+    "numpy>=1.24",
+    "scikit-image>=0.21",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Homepage = "https://github.com/HyperLambdaX/pylidar"
+Issues = "https://github.com/HyperLambdaX/pylidar/issues"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4",
+    "pytest-benchmark>=4.0",
+]
+
+[tool.scikit-build]
+cmake.version = ">=3.26"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["python/pylidar"]
+minimum-version = "build-system.requires"
+
+[tool.scikit-build.cmake.define]
+# Allow find_package(nanobind) to locate the bundled config from the build deps.
+# scikit-build-core injects the right CMAKE_PREFIX_PATH automatically; left here as
+# documentation for ad-hoc cmake invocations.
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-m 'not requires_fixture'"
+markers = [
+    "requires_fixture: test depends on lidR-generated reference fixture (skipped by default; enable with `-m requires_fixture`)",
+]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_*"
+test-requires = ["pytest", "scikit-image"]
+test-command = "pytest {project}/tests -m 'not requires_fixture'"
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+before-build = "brew install libomp"
+environment = { LDFLAGS = "-L$(brew --prefix libomp)/lib", CPPFLAGS = "-I$(brew --prefix libomp)/include" }
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+environment = { CL = "/openmp:llvm" }

@@ -1,0 +1,38 @@
+# Python build artifacts
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+wheels/
+*.so
+*.pyd
+*.dylib
+
+# Virtual environments
+.venv/
+.python-version
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code harness state — local config only, not project source
+.claude/
+.agents/
+skills-lock.json
+
+# Test fixtures generated locally (the canonical ones land via .npz files
+# committed by the generate_fixtures workflow)
+tests/fixtures/_local/
+
+# CMake / scikit-build
+_skbuild/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Pytest
+.pytest_cache/

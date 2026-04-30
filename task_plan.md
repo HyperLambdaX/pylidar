@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 0 — 项目骨架（待启动）
+Phase 0 — 项目骨架（完成，待 commit / Phase 1 启动）
 
 ## Reference Documents
 
@@ -22,19 +22,19 @@ Phase 0 — 项目骨架（待启动）
 
 **目标**：搭好"可 `pip install -e .` + `pytest` 跑空骨架测试"的最小架子。所有架构问题（CMake glue、nanobind 链路、cibuildwheel 雏形、目录布局）在此暴露并解决。
 
-- [ ] 重写 `pyproject.toml`（scikit-build-core、nanobind、`requires-python>=3.10`、GPL-3-or-later、numpy/skimage 依赖）
-- [ ] 创建 `LICENSE`（GPL-3 全文）、`NOTICE`（nanoflann BSD-2 attribution）
-- [ ] 顶层 `CMakeLists.txt`：find OpenMP / nanobind，add_subdirectory core/bindings
-- [ ] `src/core/CMakeLists.txt` + `src/core/its/CMakeLists.txt`（占位 target）
-- [ ] `src/bindings/CMakeLists.txt`
-- [ ] 下载 vendor `src/core/third_party/nanoflann.hpp`（v1.5.x release，单 header）
-- [ ] `src/core/common/`：`matrix2d.hpp`（列主序）、`point_cloud.hpp`（POD + TreeTop）、`span.hpp`、`log.hpp`、`nanoflann_adaptor.hpp`
-- [ ] `src/bindings/module.cpp`：仅注册 `set_log_callback`（验证 binding 链路）
-- [ ] `python/pylidar/__init__.py`、`_core.pyi`、`_validate.py`、`segmentation.py` 骨架
-- [ ] `tests/test_matrix2d.py`、`tests/test_api_smoke.py`
-- [ ] `.github/workflows/ci.yml`（matrix Linux/macOS/Windows × Py 3.10/3.12/3.14）
-- [ ] **Acceptance**：本机 `uv pip install -e .` 成功；`pytest tests/ -m "not requires_fixture"` 全过；CI 在 push 时跑通
-- **Status:** pending
+- [x] 重写 `pyproject.toml`（scikit-build-core、nanobind、`requires-python>=3.10`、GPL-3-or-later、numpy/skimage 依赖）
+- [x] 创建 `LICENSE`（GPL-3 全文）、`NOTICE`（nanoflann BSD-2 attribution）
+- [x] 顶层 `CMakeLists.txt`：find OpenMP / nanobind，add_subdirectory core/bindings
+- [x] `src/core/CMakeLists.txt` + `src/core/its/CMakeLists.txt`（占位 target）
+- [x] `src/bindings/CMakeLists.txt`
+- [x] 下载 vendor `src/core/third_party/nanoflann.hpp`（v1.5.5，单 header）
+- [x] `src/core/common/`：`matrix2d.hpp`（列主序）、`point_cloud.hpp`（POD + TreeTop）、`span.hpp`、`log.hpp`、`nanoflann_adaptor.hpp`
+- [x] `src/bindings/module.cpp`：仅注册 `set_log_callback`（验证 binding 链路）
+- [x] `python/pylidar/__init__.py`、`_core.pyi`、`_validate.py`、`segmentation.py` 骨架
+- [x] `tests/test_matrix2d.py`（v0.1 占位，C++-only 类型；Phase 1+ 替换）、`tests/test_api_smoke.py`
+- [x] `.github/workflows/ci.yml`（matrix Linux/macOS/Windows × Py 3.10/3.12/3.14）
+- [x] **Acceptance**：本机 `uv pip install -e ".[test]"` 成功；`pytest tests -m "not requires_fixture"` 4 passed / 1 skipped；CI 待 push 后验证
+- **Status:** complete
 
 ### Phase 1: smooth_height（最简算法，验证全链路）
 

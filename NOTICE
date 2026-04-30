@@ -1,0 +1,45 @@
+pylidar
+=======
+
+Copyright (C) 2026 HyperLambdaX <yinleipine@gmail.com>
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+This package is a port of individual tree segmentation (ITS) algorithms from
+the R package `lidR` (https://github.com/r-lidar/lidR), licensed under
+GPL-3.0-or-later. Algorithm correctness and parameter semantics follow lidR
+v4.3.2; see docs/specs/2026-04-30-pylidar-its-design.md for the migration
+mapping.
+
+
+Third-Party Components
+----------------------
+
+This package vendors the following third-party source code. Licenses listed
+here apply only to those components, not to the rest of pylidar.
+
+* nanoflann (header-only KD-tree library)
+  Path:    src/core/third_party/nanoflann.hpp
+  Version: 1.5.5
+  Source:  https://github.com/jlblancoc/nanoflann
+  License: BSD 2-Clause "Simplified" License
+  Copyright: 2008-2009 Marius Muja, 2008-2009 David G. Lowe,
+             2011-2024 Jose Luis Blanco Claraco, et al.
+  See the comment header at the top of nanoflann.hpp for the full license.
+
+
+Build-time Dependencies (not redistributed in the wheel source)
+---------------------------------------------------------------
+
+* nanobind (https://github.com/wjakob/nanobind, BSD-3-Clause) — Python C++
+  binding generator. Pulled in via `pyproject.toml [build-system].requires`;
+  produces the `_core` extension module shipped in the wheel.
+
+* scikit-build-core (https://github.com/scikit-build/scikit-build-core,
+  Apache-2.0) — PEP 517 build backend.
+
+These tools are used to build pylidar but their source is not redistributed
+inside pylidar wheels.
