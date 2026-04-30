@@ -4,17 +4,13 @@ Validation philosophy (spec §6.4 / §8.3): catch user mistakes here in Python
 with native ``TypeError``/``ValueError`` so users get a Python-style traceback
 that points at *their* call, not deep inside the binding layer. The C++ core
 only checks unrecoverable internal invariants.
-
-Phase 0: this module only declares the function surface — implementations land
-in Phase 1 alongside the first algorithm.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Tuple
+from typing import Tuple
 
-if TYPE_CHECKING:
-    import numpy as np
+import numpy as np
 
 __all__ = [
     "ensure_chm_float64",
@@ -23,28 +19,45 @@ __all__ = [
 ]
 
 
-def ensure_chm_float64(arr: "np.ndarray", *, name: str = "chm") -> "np.ndarray":
-    """Validate a CHM input. Returns ``arr`` unchanged on success.
+def ensure_xyz_float64(arr: object, *, name: str = "xyz") -> np.ndarray:
+    """Validate an ``(N, 3)`` float64 C-contiguous point cloud.
 
-    Raises ``TypeError`` if dtype isn't float64. Raises ``ValueError`` if
-    ``arr.ndim != 2`` or the array isn't C-contiguous.
+    Returns ``arr`` unchanged on success.
+
+    - ``TypeError`` if ``arr`` is not a numpy array or its dtype isn't
+      ``float64``. The message names the offending arg and suggests
+      ``.astype(np.float64)``.
+    - ``ValueError`` if shape is not ``(N, 3)``, ``N == 0``, or storage is not
+      C-contiguous (suggests ``np.ascontiguousarray``).
     """
-    raise NotImplementedError("Phase 1+")
+    if not isinstance(arr, np.ndarray):
+        raise TypeError(
+            f"{name} must be a numpy.ndarray, got {type(arr).__name__}"
+        )
+    if arr.dtype != np.float64:
+        raise TypeError(
+            f"{name} must have dtype=float64, got {arr.dtype}. "
+            f"Convert with {name}.astype(np.float64) before calling."
+        )
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError(
+            f"{name} must have shape (N, 3), got {arr.shape}"
+        )
+    if arr.shape[0] == 0:
+        raise ValueError(f"{name} must contain at least one point, got N=0")
+    if not arr.flags["C_CONTIGUOUS"]:
+        raise ValueError(
+            f"{name} must be C-contiguous. "
+            f"Wrap with np.ascontiguousarray({name}) before calling."
+        )
+    return arr
 
 
-def ensure_xyz_float64(arr: "np.ndarray", *, name: str = "xyz") -> "np.ndarray":
-    """Validate an (N, 3) point cloud. Returns ``arr`` unchanged on success.
-
-    Raises ``TypeError`` if dtype isn't float64. Raises ``ValueError`` on
-    shape != (N, 3) or non-C-contiguous storage.
-    """
-    raise NotImplementedError("Phase 1+")
+def ensure_chm_float64(arr: object, *, name: str = "chm") -> np.ndarray:
+    """Validate a CHM input. Phase 2+ (lmf / dalponte / silva)."""
+    raise NotImplementedError("Phase 2+")
 
 
 def ensure_transform(transform: object) -> Tuple[float, float, float]:
-    """Validate a CHM transform 3-tuple ``(origin_x, origin_y, pixel_size)``.
-
-    Raises ``TypeError`` if not a 3-tuple of floats. Raises ``ValueError`` if
-    ``pixel_size <= 0``.
-    """
-    raise NotImplementedError("Phase 1+")
+    """Validate a CHM transform 3-tuple. Phase 2+ (raster algorithms)."""
+    raise NotImplementedError("Phase 2+")

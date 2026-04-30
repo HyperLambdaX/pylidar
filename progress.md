@@ -56,9 +56,37 @@
 - CI（GH Actions run 25154106410）：3 OS × 3 Python = 9 jobs 全绿，首次 push 即过；最慢 windows-latest/py3.12 = 2m08s。两条非阻塞 annotation：actions/checkout@v4 + setup-python@v5 的 Node.js 20 deprecation（hard deadline 2026-09），macos py3.10 一次 cache deserialization warning（runner 端噪声）。
 - Repo：https://github.com/HyperLambdaX/pylidar（public，main 已 push，origin 已绑定）
 
-### Phase 1-8
+### Phase 1: smooth_height
+
+- **Status:** complete（2026-04-30）
+- User 决策（本次启动）：
+  1. Method 枚举 v0.1 = `{Mean, Gaussian}`，与 lidR 上游一致；spec §6.3 提到的 `Median` 推迟到 v0.2 reserved。
+  2. Python 形参字符串走 spec 的 `"circular"`/`"square"`；C++ 端枚举命名相应（保留 lidR 的 int 值 1/2 便于直译）。
+- Files created/modified:
+  - `src/core/its/smooth_height.{hpp,cpp}`（创建；从 `LAS::z_smooth` 直译，nanoflann::KDTree2D 替代 lidR `SpatialIndex`；shape=Square 用外接圆 + bbox 后过滤）
+  - `src/core/its/CMakeLists.txt`（INTERFACE → STATIC，挂 `OpenMP::OpenMP_CXX`）
+  - `src/bindings/module.cpp`（加 `_core.smooth_height`，输入 `nb::ndarray<const double, shape<-1,3>, c_contig>` 零拷贝，输出 1D numpy via `nb::capsule` 拥有；`nb::gil_scoped_release` 包住 C++ 调用）
+  - `python/pylidar/_validate.py`（实装 `ensure_xyz_float64`；`ensure_chm_float64`/`ensure_transform` 仍占位至 Phase 2+）
+  - `python/pylidar/segmentation.py`（`smooth_height(...)` 包装：字符串 → int 映射 + sigma 默认 `size/6`）
+  - `python/pylidar/__init__.py`（re-export `smooth_height`）
+  - `python/pylidar/_core.pyi`（补 `smooth_height` 存根）
+  - `tests/test_smooth_height.py`（6 case：变量缩小 / 4 组 method×shape 平地恒定 / sigma=0 mean 无害 + sigma=0 gaussian 抛 / 空数组 / float32 抛 TypeError / 错误 shape 字符串抛 ValueError）
+- Acceptance：`uv pip install -e ".[test]" --no-deps`（macOS arm64 / py3.14.2）成功；`pytest tests -m "not requires_fixture"` = **10 passed, 1 skipped**（task_plan 要求 4 case，实交 6，全过）。
+- 上游 lidR 发现的小坑（仅供记录，**不影响** v0.1）：`R/smooth_height.R` 第 45 行 `if (method == "circle") shape <- 1 else shape <- 2` 应是 `if (shape == "circle") ...`，导致 lidR 的 `smooth_height(..., shape="square")` 实际上走 circular 分支。Phase 8 生成 fixture 时若要测 square 必须直接调 `C_smooth(..., shape=1, ...)` 绕开 R 包装。
+
+### Phase 2-8
 
 - **Status:** pending（详见 task_plan.md）
+
+## 5-Question Reboot Check (post Phase 1)
+
+| Question | Answer |
+|----------|--------|
+| Where am I? | Phase 1 完成；Phase 2 (lmf_chm + lmf_points) 待启动 |
+| Where am I going? | Phase 2：抽 `LAS::fast_local_maximum_filter` 两分支 → `core/its/lmf.{hpp,cpp}` + 两个 binding（CHM/点云）+ 两个 Python wrapper |
+| What's the goal? | 走通栅格分支（CHM transform 3-tuple 链路）+ 树顶 (M,3) 输出格式；为 Phase 3-4 的 dalponte/silva seeds 接口先打地基 |
+| What have I learned? | nanoflann::KDTreeSingleIndexAdaptor 默认 IndexType=`uint32_t`（不是 size_t）；radius 用平方距离；adaptor 不支持 bbox query → square 邻域用外接圆 + bbox 后过滤；M_PI 在 MSVC 上不可移植，用 `std::acos(-1.0)`；lidR `R/smooth_height.R` 有 shape 参数的 typo（永远走 circle，详见 Phase 1 章末）。 |
+| What have I done? | Phase 0 + Phase 1（含一次 user gate：method 枚举范围 + 形参字符串），9 文件 modified/created，10/11 测试通过（1 skipped 是 Phase 0 占位） |
 
 ## 5-Question Reboot Check (post Phase 0)
 

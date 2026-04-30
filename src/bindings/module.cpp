@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // pylidar._core — nanobind extension entry point.
 //
-// Phase 0 only registers `set_log_callback` to validate the binding chain.
-// Algorithm functions (smooth_height, lmf_*, segment_*) land in subsequent
-// phases by including the relevant `core/its/*.hpp` and adding nb::def calls.
+// Phase 0 registered set_log_callback only.
+// Phase 1 adds smooth_height as the first algorithm binding.
+// Public Python API names live in pylidar.* — _core is internal.
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/string_view.h>
 
+#include <cstdint>
+#include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
-#include "../core/common/log.hpp"
+#include "common/log.hpp"
+#include "common/point_cloud.hpp"
+#include "its/smooth_height.hpp"
 
 namespace nb = nanobind;
 
@@ -49,12 +56,66 @@ void install_python_log_callback(nb::object cb) {
         });
 }
 
+// Helper: copy a std::vector<double> into a freshly-allocated numpy array.
+// The capsule owns the heap buffer and frees it on numpy's gc.
+nb::ndarray<nb::numpy, double, nb::ndim<1>> vector_to_numpy_1d(
+    std::vector<double>&& src) {
+    const std::size_t n = src.size();
+    auto* buf = new double[n];
+    if (n > 0) {
+        std::memcpy(buf, src.data(), n * sizeof(double));
+    }
+    nb::capsule owner(buf, [](void* p) noexcept {
+        delete[] static_cast<double*>(p);
+    });
+    return nb::ndarray<nb::numpy, double, nb::ndim<1>>(
+        buf, {n}, std::move(owner));
+}
+
+// _core.smooth_height — internal entry point. Public API lives in
+// pylidar.segmentation.smooth_height which validates inputs and maps the
+// "mean"/"gaussian" + "circular"/"square" strings to these ints.
+nb::ndarray<nb::numpy, double, nb::ndim<1>> bind_smooth_height(
+    nb::ndarray<const double, nb::shape<-1, 3>, nb::c_contig, nb::device::cpu>
+                xyz,
+    double      size,
+    int         method,
+    int         shape,
+    double      sigma) {
+    if (method != 1 && method != 2) {
+        throw std::invalid_argument(
+            "smooth_height: method must be 1 (mean) or 2 (gaussian)");
+    }
+    if (shape != 1 && shape != 2) {
+        throw std::invalid_argument(
+            "smooth_height: shape must be 1 (square) or 2 (circular)");
+    }
+
+    const double*     base = xyz.data();
+    const std::size_t n    = xyz.shape(0);
+
+    // (N,3) row-major numpy → PointCloudXYZ zero-copy view (stride=3).
+    pylidar::common::PointCloudXYZ pc{
+        base, base + 1, base + 2, n, /*stride=*/3};
+
+    std::vector<double> result;
+    {
+        nb::gil_scoped_release release;
+        result = pylidar::its::smooth_height(
+            pc, size,
+            static_cast<pylidar::its::SmoothMethod>(method),
+            static_cast<pylidar::its::Shape>(shape),
+            sigma);
+    }
+    return vector_to_numpy_1d(std::move(result));
+}
+
 }  // namespace
 
 NB_MODULE(_core, m) {
     m.doc() =
-        "pylidar._core — C++ algorithm core (Phase 0: smoke / log only). "
-        "Public Python API lives in pylidar.* — do not import _core directly.";
+        "pylidar._core — C++ algorithm core. Public Python API lives in "
+        "pylidar.* — do not import _core directly.";
 
     m.def(
         "set_log_callback",
@@ -64,4 +125,15 @@ NB_MODULE(_core, m) {
         "Pass None to disable logging (default). The callable is invoked with "
         "a single str argument. Exceptions are routed through "
         "sys.unraisablehook.");
+
+    m.def(
+        "smooth_height",
+        &bind_smooth_height,
+        nb::arg("xyz"),
+        nb::arg("size"),
+        nb::arg("method"),
+        nb::arg("shape"),
+        nb::arg("sigma"),
+        "Internal: smooth point-cloud Z values. Use pylidar.smooth_height "
+        "for the validating string-based API.");
 }

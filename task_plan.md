@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 0 — 项目骨架（完成，待 commit / Phase 1 启动）
+Phase 1 — smooth_height（完成，待 commit / Phase 2 启动）
 
 ## Reference Documents
 
@@ -40,14 +40,14 @@ Phase 0 — 项目骨架（完成，待 commit / Phase 1 启动）
 
 **目标**：完整走通"Python 校验 → bindings → C++ 算法 → kd-tree → 返回 numpy"。架构问题如有遗漏在这一步暴露。
 
-- [ ] `src/core/its/smooth_height.{hpp,cpp}`（从 `LAS.cpp::z_smooth` 抽取）
-- [ ] `src/bindings/module.cpp` 加 `_core.smooth_height`
-- [ ] `python/pylidar/segmentation.py` 实现 `smooth_height(...)` 包装
-- [ ] `python/pylidar/__init__.py` re-export
-- [ ] `python/pylidar/_core.pyi` 补存根
-- [ ] `tests/test_smooth_height.py`（4 case：随机点云方差缩小 / 平地恒定 / sigma=0 退化 / 空数组抛 ValueError）
-- [ ] **Acceptance**：4 测试全过
-- **Status:** pending
+- [x] `src/core/its/smooth_height.{hpp,cpp}`（从 `LAS.cpp::z_smooth` 抽取）
+- [x] `src/bindings/module.cpp` 加 `_core.smooth_height`
+- [x] `python/pylidar/segmentation.py` 实现 `smooth_height(...)` 包装
+- [x] `python/pylidar/__init__.py` re-export
+- [x] `python/pylidar/_core.pyi` 补存根
+- [x] `tests/test_smooth_height.py`（实交 6 case：4 task_plan 必需 + 2 额外校验：错 dtype / 错 shape 字符串）
+- [x] **Acceptance**：本机 `pytest tests -m "not requires_fixture"` = 10 passed, 1 skipped（Phase 0 占位 Matrix2D 仍 skip）
+- **Status:** complete
 
 ### Phase 2: lmf_chm + lmf_points
 

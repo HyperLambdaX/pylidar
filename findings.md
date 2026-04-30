@@ -129,3 +129,28 @@
 
 - **每个新 binding 同一 PR 内必须有 pytest smoke。** Phase 0 的 4 个 smoke 是模板：import → 扩展 load → 函数可调 → 错误类型可触发。Phase 1+ 加算法函数照抄。
 - **`pyproject.toml` 里 `addopts = "-m 'not requires_fixture'"` 默认跳过 lidR-fixture 测试**，所以本地不装 R 也能跑。Phase 8 加 `@pytest.mark.requires_fixture` 标记的对照测试就靠这个 marker。
+
+### nanoflann 用法（Phase 1 抽出）
+
+- **L2_Simple_Adaptor 的默认 IndexType 是 `uint32_t`**，不是 `size_t`。`std::vector<nanoflann::ResultItem<std::uint32_t, double>> matches;` 是匹配 KDTree2D/3D 默认实例化的结果类型。写错会编译失败但报错很晦涩。
+- **radius 用平方距离**：`tree.radiusSearch(query, radius_sq, matches)` 第二参是 `radius * radius`（L2 metric 的语义）。文档 §1723 注释明确写过——抄错会少／多匹配 sqrt(2) 倍邻居。
+- **adaptor 不支持 bbox query**。需要矩形/方形邻域时的 pattern：用外接圆半径（square 边长 `s` → `radius = s*sqrt(2)/2` → `radius_sq = s²/2`）做 radius search，再在循环里用 `abs(dx)<=half_size && abs(dy)<=half_size` 过滤。`smooth_height.cpp` 的 Square 分支是模板。
+- **`SearchParameters{}.sorted = false`** 显式关掉排序——我们要的是邻居集合而不是 nearest-K，没必要付那个 sort 成本。
+
+### C++17 可移植性细节（Phase 1 抽出）
+
+- **MSVC 默认不带 `M_PI`**（要 `_USE_MATH_DEFINES`）。**用 `std::acos(-1.0)`** 在所有平台一行解决。
+- **OpenMP parallel for 的循环变量用 `std::ptrdiff_t`/有符号整型**，不要用 `size_t`。Apple Clang/GCC 都接受 unsigned，但 MSVC OpenMP 2.0 不行；为了 CI 三平台都过，统一有符号。
+- **算法库要直接 link `OpenMP::OpenMP_CXX`**，不能只靠顶层 `find_package`。Phase 1 改 `pylidar_its` 从 INTERFACE 升级到 STATIC 时同时把 OpenMP 加到 PUBLIC link——遗漏会导致 `#pragma omp parallel for` 在该 .cpp 里被静默忽略，单线程跑过测试，性能问题晚一截才暴露。
+
+### lidR 上游的小 bug（Phase 1 撞到，纯供 fixture 生成时绕开）
+
+- `R/smooth_height.R:45` —— `if (method == "circle") shape <- 1 else shape <- 2`，本意应为 `if (shape == "circle") shape <- 1 else shape <- 2`。结果 R API 的 `shape="square"` 实际走 `C_smooth(..., shape=2, ...)` 即 Circle。
+- 影响：Phase 8 生成 smooth_height 的 lidR 参考 fixture 时**不要**走 R 包装；直接 `lidR:::C_smooth(las, size, method, shape=1, sigma, ncpu)`（C 入口，shape=1 强制 Rectangle）才能拿到真正的 square 输出对照 pylidar。circular 走 R API 没问题。
+- 我们 C++ 端的 Square / Circular 行为不受影响——已经从 `LAS::z_smooth` 那一层直译，没经过 R 包装那行。
+
+### Python 包装层模式（Phase 1 抽出）
+
+- **C++ 算法函数返回 `std::vector<double>` → bindings 里手动转 numpy**（`new double[n]` + `nb::capsule` 拥有 + `nb::ndarray<nb::numpy, double, nb::ndim<1>>`）。比 `@stl/vector.h` 给出来的 Python list 体面，比直接用 `nb::ndarray` 写 in-place 输出参数干净。模板已在 `module.cpp::vector_to_numpy_1d` 里。
+- **GIL 用 `nb::gil_scoped_release` 块**（不是 `call_guard`）包住对 C++ 算法的调用——这样异常 / 返回值的 Python 类型构造仍持 GIL 执行，只有真正 CPU 重活在无 GIL 期间。`nb::call_guard<nb::gil_scoped_release>()` 也行但 release 范围更宽，遇到 nanobind 内部要 GIL 的边界场景更难调。
+- **Python 层默认值就地 fallback** 比让 C++ 处理 `optional<double>` 简单太多。`segmentation.py::smooth_height` 的 `sigma is None → size/6` 是模板；不要把这逻辑塞进 binding。
