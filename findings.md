@@ -98,3 +98,34 @@
 - macOS libomp / MSVC `/openmp:llvm` / manylinux libgomp 三套打包路径 → Phase 7 单独 phase 处理
 - nanoflann ABI 漂移 → vendor 锁版本 v1.5.x，NOTICE 标版本，不跟主线
 - GPL-3 与企业用户兼容 → README 顶部明示，鼓励双许可商谈
+
+## Recurring Lessons（每次 phase 开始前扫一眼）
+
+> 从 phase 内的 debug 经验里挑出"下一个 phase 极可能再撞"的几条。冷启动（`/clear` 后）回到这里，比从头读代码更快。
+
+### nanobind 2.x — 绑定写法的几个坑
+
+- **不要用 `std::optional<nb::callable>` 或 `nb::callable` 作参数类型。** 实测 nb 2.x 在 Python 端传 `builtin_function_or_method`（如 `list.append`）时不会匹配进去，会抛 `TypeError: incompatible function arguments`。代替方案：参数用 `nb::object`，函数体里 `PyCallable_Check(obj.ptr())` 自己校验。Phase 0 的 `set_log_callback` 就是这么改的；之后任何接收回调的 binding 都按这个套路写。
+- **`nb::python_error::discard_as_unraisable` 是 non-const 成员函数。** `catch (const nb::python_error&)` 编译不过；要写 `catch (nb::python_error& e)`。
+- **GIL 边界：** 算法函数加 `nb::call_guard<nb::gil_scoped_release>()` 就能释放 GIL，但只要回调回到 Python（log、用户传入的 functor）就必须 `nb::gil_scoped_acquire` 重获。`set_log_callback` 的 lambda 已经示范这个 pattern。
+- **`@stl/function.h` / `@stl/optional.h` 的隐式转换不万能。** 一旦绑定签名被 nanobind 拒绝，第一反应是回到 `nb::object` + 手动 narrow，不要在 STL 转换上反复试。
+- **绑定写错时编译期未必报错，运行时才会暴露。** 任何新 `m.def(...)` 必须配 pytest smoke，不能只靠"编译通过"。
+
+### 构建链路
+
+- **macOS Apple Clang 的 OpenMP shim 已在顶层 `CMakeLists.txt` 里。** 如果 Phase 1+ 引入 `#pragma omp` 后链接失败，问题大概率不在 shim 本身（`-Xpreprocessor -fopenmp -lomp` 已配好），而在算法 static lib 没继承 `OpenMP::OpenMP_CXX`。届时给 `pylidar_its` 加 `target_link_libraries(... PUBLIC OpenMP::OpenMP_CXX)`。
+- **scikit-build-core ≥ 0.12 严格执行 PEP 639。** SPDX `license = "..."` 与旧式 `License :: OSI Approved :: ...` classifier **不能共存**，构建会直接 fail。任何时候改 `pyproject.toml` 都别加 License classifier。
+- **本地 dev 装包流程（macOS arm64 已验）：**
+  ```sh
+  uv venv --python 3.14 .venv
+  source .venv/bin/activate
+  uv pip install -e ".[test]"
+  pytest tests -m "not requires_fixture"
+  ```
+  增量改 C++ 后用 `uv pip install -e ".[test]" --no-deps` 重装更快（不再 resolve 依赖，~3s）。
+- **`wheel.packages = ["python/pylidar"]` + `install(TARGETS _core LIBRARY DESTINATION pylidar)`** 的搭配让 nanobind 扩展落进 `pylidar/` 包目录。Phase 1+ 如果再加扩展或多 wheel target，确认 `DESTINATION` 仍是 `pylidar`，不要写成 `pylidar/_core/`。
+
+### 测试与验证习惯
+
+- **每个新 binding 同一 PR 内必须有 pytest smoke。** Phase 0 的 4 个 smoke 是模板：import → 扩展 load → 函数可调 → 错误类型可触发。Phase 1+ 加算法函数照抄。
+- **`pyproject.toml` 里 `addopts = "-m 'not requires_fixture'"` 默认跳过 lidR-fixture 测试**，所以本地不装 R 也能跑。Phase 8 加 `@pytest.mark.requires_fixture` 标记的对照测试就靠这个 marker。
