@@ -53,6 +53,8 @@
   - nanobind `optional<callable>` 在 nb 2.x 不接受 Python `builtin_function_or_method` → 改用 `nb::object` + `PyCallable_Check`
   - `nb::python_error::discard_as_unraisable` 是 non-const → 删去 const
 - Acceptance：`uv pip install -e ".[test]"` 成功（macOS arm64 / py3.14.2 / clang 21）；`pytest tests -m "not requires_fixture"` = 4 passed, 1 skipped (test_matrix2d 占位)
+- CI（GH Actions run 25154106410）：3 OS × 3 Python = 9 jobs 全绿，首次 push 即过；最慢 windows-latest/py3.12 = 2m08s。两条非阻塞 annotation：actions/checkout@v4 + setup-python@v5 的 Node.js 20 deprecation（hard deadline 2026-09），macos py3.10 一次 cache deserialization warning（runner 端噪声）。
+- Repo：https://github.com/HyperLambdaX/pylidar（public，main 已 push，origin 已绑定）
 
 ### Phase 1-8
 
