@@ -101,9 +101,41 @@
 - C++ 加 `std::isfinite(hmin)` 校验（user-flagged）：spec §6.4 要求 core 独立 link 时也得查不变量；hmin=NaN 原本会让所有点静默被跳过返回空集——与 Phase 1 size/sigma 同类 bypass。
 - 顺手清理：`state` 向量、`kUKN/kNLM/kLMX` 三个 char 常量、`zmax` 冗余变量全删。lmf.hpp / lmf.cpp 文件头注释完整描述这两处与上游的偏离及理由。
 
-### Phase 3-8
+### Phase 3: dalponte2016
+
+- **Status:** complete（2026-04-30）
+- 设计选择（in-phase 自主决策，无新增 user gate；spec §7 已覆盖 seeds (M,3)/(M,4) 接口）：
+  1. C++ 入口收 `vector<TreeTop>`（世界 XY + caller-assigned id），seeds 像素化在 C++ 内部完成（`std::lround` 取最近像素中心，越界 / NaN XY 静默丢弃）。这把 lidR R 包装里的 `stars::st_rasterize` + `crop_special_its` 两步合进算法 core，让 C++ 函数可被独立 link。
+  2. lidR R 端的 `Canopy[is.na(Canopy)] <- -Inf` NaN→-inf 也内化进 C++ 算法（用临时 `Matrix2D<double>` 副本，原 RasterView 不动）。所有 `pz > th_tree` / 比较自然过滤 NaN，无新分支。
+  3. lidR 算法的"single-scan 多 seed 写入同一邻居 cell"和"多次 npixel/sum_height 重复累加"两个微妙副作用 **直译保留**——这是 lidR 既有行为，行为对齐优先于"看起来更干净"。文件头有详细注释说明。
+  4. seeds (M,3) → (M,4) 自动 ID 分配在 `_validate.ensure_seeds_xyzid` 完成，binding 接口固定收 (M,4)。`id == 0` 在 (M,4) 形态被 Python 层拒绝（`ValueError`），因为 0 是 C++ 输出栅格的"无树"哨兵。
+  5. binding 输出 `(H, W) int32` row-major，列主序 `Matrix2D<int32_t>` → row-major 一次嵌套循环拷贝（与 Phase 2 对 CHM 输入的 `H·W` 拷贝同形）。
+- Files created/modified:
+  - `src/core/its/dalponte2016.{hpp,cpp}`（创建；C_dalponte2016 直译，~200 行 .cpp 含详细文件头）
+  - `src/core/its/CMakeLists.txt`（dalponte2016.cpp 加入 STATIC lib）
+  - `src/bindings/module.cpp`（加 `bind_dalponte2016`：CHM 列主序拷贝 + seeds (M,4) → vector<TreeTop> + result int32 列→行主序拷贝）
+  - `python/pylidar/_validate.py`（加 `ensure_seeds_xyzid`：(M,3) 自动 1..M / (M,4) 用户 ID + id≠0 校验）
+  - `python/pylidar/segmentation.py`（加 `segment_dalponte2016`：标量校验 + 调 `_core.dalponte2016`）
+  - `python/pylidar/__init__.py`（re-export `segment_dalponte2016`）
+  - `python/pylidar/_core.pyi`（加 `dalponte2016` 存根）
+  - `tests/test_dalponte2016.py`（创建；18 case：5 task_plan 必须 + 13 extras）
+- Acceptance：`uv pip install -e ".[test]"`（macOS arm64 / py3.14.2）成功；`uv run pytest tests -m "not requires_fixture"` = **51 passed, 1 skipped**。
+- Test design 经验：手算 expected crown 时第一版的 ring=6 在 z=12 peak 处 fail (`6 > 12 * 0.55 = 6.6` false)；改 ring=7 后两 peak 都过。lidR 默认 `th_cr=0.55` 实际上对 peak height 与 ring height 之比有强约束（ring/peak > 0.55），后续 fixture 对照测时合成数据要照此设计。
+- C++ 直调入口未单独写测试（不像 Phase 1/2 给 size/sigma/hmin 加了 NaN 直调测试）：dalponte2016 的所有 invariant 都在 Python 层先校验，且无线程并发逻辑——直调测试与 Python 测试 100% 重叠。
+
+### Phase 4-8
 
 - **Status:** pending（详见 task_plan.md）
+
+## 5-Question Reboot Check (post Phase 3)
+
+| Question | Answer |
+|----------|--------|
+| Where am I? | Phase 3 完成；Phase 4 (silva2016) 待启动 |
+| Where am I going? | Phase 4：从 R/algorithm-its.R 第 203-325 行的纯 R silva2016 翻译为 C++17；这是计划中的最高风险 phase，需先写 `docs/notes/silva2016-translation-trace.md` 做行号对照笔记 + mid-phase user gate |
+| What's the goal? | 把 R 端 Voronoi + (distance/max_cr_factor) > exclusion·z 的剔除逻辑翻进 C++；算法接口与 dalponte2016 同形（CHM + seeds (M,4) → (H,W) int32），复用现有 binding pattern |
+| What have I learned? | Phase 3 关键经验：(a) lidR 算法的 multi-write-per-scan 副作用是真实存在的"feature"，直译比"清理后等价"更安全（除非有像 Phase 2 lmf 那样的明确 race / 用户复测过）；(b) 手算合成测试时 `th_cr=0.55` 对 ring/peak 高度比的约束需要先验证再下笔；(c) 列主序 `Matrix2D<int32_t>` ↔ 行主序 numpy 的两次拷贝足够便宜（H·W 单 pass），不必写 transpose helper；(d) seeds 像素化做在 C++ 内部比 Python 算 row/col 后再传 IntegerMatrix 更省接口面积，未来 silva2016 直接复用同一 `vector<TreeTop>` + 内部 lround 模式。 |
+| What have I done? | Phase 3 全部 4 sub-task + 18 测试，共 7 文件 created/modified。无 build 错误，无新 user gate。 |
 
 ## 5-Question Reboot Check (post Phase 2)
 

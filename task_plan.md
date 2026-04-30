@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-Phase 2 — lmf_chm + lmf_points（完成，待 commit / Phase 3 启动）
+Phase 3 — dalponte2016（完成，待 commit / Phase 4 启动）
 
 ## Reference Documents
 
@@ -62,11 +62,11 @@ Phase 2 — lmf_chm + lmf_points（完成，待 commit / Phase 3 启动）
 
 ### Phase 3: dalponte2016
 
-- [ ] `src/core/its/dalponte2016.{hpp,cpp}`（从 `src/C_dalponte2016.cpp` 126 行直译，去 Rcpp）
-- [ ] bindings + segmentation.py（含 seeds 形态 (M,3) / (M,4) 自动 ID 分配）
-- [ ] `tests/test_dalponte2016.py`（5 case：单峰单 seed / 双峰双 seed / seed 在 mask 区域 / 自定义 ID / dtype 错抛 TypeError）
-- [ ] **Acceptance**：5 测试全过
-- **Status:** pending
+- [x] `src/core/its/dalponte2016.{hpp,cpp}`（从 `src/C_dalponte2016.cpp` 126 行直译，去 Rcpp；NaN→-inf 内化进 C++；seeds 世界 XY → 像素 lround 取整）
+- [x] bindings + segmentation.py（含 seeds 形态 (M,3) / (M,4) 自动 ID 分配；`_validate.ensure_seeds_xyzid`）
+- [x] `tests/test_dalponte2016.py`（18 case：5 task_plan 必需 + seeds dtype/shape / empty seeds / 越界 seed / NaN cells / th_seed&th_cr 越界 parametrize / max_cr ≤ 0 / id=0 拒绝 / max_cr 紧约束生效 / int32 输出 dtype）
+- [x] **Acceptance**：本机 `pytest tests -m "not requires_fixture"` = 51 passed, 1 skipped（Phase 0 占位 Matrix2D 仍 skip）
+- **Status:** complete
 
 ### Phase 4: silva2016（**R→C++ 翻译，最高风险 phase**）
 

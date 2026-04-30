@@ -91,6 +91,59 @@
 - 自定义 seed ID API（v0.1 用 (M,4) 数组带 id 列；v0.2 视反馈是否引 dict / record array）
 - 跨算法复用 kd-tree 的 `SpatialIndexHandle`（v0.2 优化项，v0.1 每次调用重建）
 
+### Phase 3 dalponte2016 未验证假设（Phase 8 fixture 时回头核对）
+
+合成测试覆盖了 18 case，但下面这些"我们的实现选了一个分支、lidR 也大概率走同一分支但我没动手跑过"的边界没单独测。每条都给出"我们当前行为 / 推测 lidR 行为 / 验证手段"。Phase 8 装好 R+lidR 跑 `C_dalponte2016` 时优先核这几条。
+
+1. **Seed 落在 CHM 的 NaN 像素**
+   - 我们：C++ 把 NaN→-inf，seed 的像素照样被赋 id；后续 `pz <= h_seed + h_seed*0.05 = -inf` 全部 false → crown 只剩 seed 那一格。
+   - lidR：R 端 `Canopy[is.na(Canopy)] <- -Inf` 与 seed 栅格化独立，`Maxima(seed_pixel) = id` 不受 NaN 影响——预期行为同上。
+   - 验证：fixture 造 5x5 CHM 中心一个 NaN，treetop 打中 NaN cell，断言 lidR 输出也是仅 1 像素 crown。如果一致，给文档补一行"seeds 落在 NaN 上仅自标记，不增长"；如果 lidR 实际走另一分支，再修。
+
+2. **两个 seed 栅格化到同一像素**
+   - 我们：for-loop 循环顺序里 last seed 的 id 写入 `region(r,c)`、并各自填 `seed_px/sum_height/npixel`。算法只会从 region 中找到最后那个 id 来扩张；先一个 seed 的 bookkeeping 永远不被命中。
+   - lidR：`stars::st_rasterize(...)` 默认 `merge=NULL`（最后一个 feature 覆盖），但 sf 几何处理顺序未必与 R DataFrame 行顺序一一对应。
+   - 验证：fixture 显式造 2 seed 同 cell，对照输出 id。若 lidR 是"先到先得"，要在 Python 层调成相同顺序（或加 `_validate` warning）。
+
+3. **相邻 crown 在同一 scan 抢同一邻居像素**
+   - 我们：直译保留——`region_temp(nr, nc) = id` 后写覆盖前写，row-major 顺序里"右下侧"的 seed 赢。也就是说两 crown 之间的"分界面"由扫描顺序决定，不是几何对称的。
+   - lidR：相同代码 (`Regiontemp(px.x, px.y) = Region(r,k)`)——预期一致。
+   - 验证：fixture 造两个相邻 seed（col 距 = 2），中间 cell 同时满足两边 expand 条件，断言 lidR 与我们都把它分给 row-major-后那个 seed。
+
+4. **Seed XY 是 NaN / +Inf** *(resolved 2026-04-30)*
+   - 当前：`_validate.ensure_seeds_xyzid` 用 `np.all(np.isfinite(arr[:, :3]))` 拒绝 NaN/Inf x/y/z，抛 `ValueError("seeds x/y/z values must all be finite ...")`。与 lidR 行为对齐（lidR 在 `sf::st_rasterize` 之前就因 NaN 几何抛错）。
+   - 测试：`test_seed_nonfinite_xyz_raises_value_error` 用 5 组 parametrize 覆盖 NaN/+Inf/-Inf × x/y/z 列。
+
+5. **Negative seed id / id == 0** *(resolved 2026-04-30)*
+   - 当前：`ensure_seeds_xyzid` 在 (M, 4) 形态下要求 `id >= 1`（spec §3 / §7 公开协议）。`id == 0` 与 `id < 0` 都报 `ValueError("seeds IDs ... must all be >= 1 ...")`。
+   - 测试：`test_seed_id_below_one_in_M4_form_raises_value_error` 用 `bad_id ∈ {0.0, -1.0, -42.0}` parametrize。
+   - 与 lidR 的差异（保留）：上游 `treetops[[ID]]` 接受任意 integer 包括负值；我们更严格，因为 pylidar 的 spec/docstring 公开协议是"int32, ≥1 = tree id"——避免下游 `crowns > 0` mask 在传负 id 时静默失效。
+
+6. **`max_cr` 边界 = 1.0 与小数 max_cr**
+   - 我们：用 `<` 不是 `<=`（直译 lidR `abs(...) < DIST`），所以 `max_cr=1.0` → 仅 seed 自身（|±1| < 1 false），neighbour 全部被拒；`max_cr=1.5` → ±1 邻居通过，±2 全拒。当前测试用 `max_cr=2` 验证 "narrow < wide"，没钉到精确截断点。
+   - lidR：相同 `<`，预期一致，但小数 max_cr 是相对未常用的输入。
+   - 验证：fixture 造 7x7 单峰，分别用 `max_cr ∈ {1.0, 1.5, 2.0, 3.0}` 跑，断言 crown 像素数严格递增。
+
+7. **Seed 的 z 列不参与算法**
+   - 行为：h_seed 永远从 `image[seed_row, seed_col]` 读，seeds 数组的 z 列被忽略（C++ `bind_dalponte2016` 也只把 z 装进 `TreeTop.z` 然后丢掉）。
+   - lidR 一致——上游也不读 treetops 的 Z。
+   - 不需要 fixture，但**文档遗漏**：`segment_dalponte2016` docstring 没说"z 列被忽略"。Phase 4 写 silva2016 wrapper 时一并补上。
+
+8. **`th_tree = 0`** + CHM 全 ≥ 0：mask 不再 gate；预期 crown 长满全连通的 above-0 区域。lidR 同。低优先验证，Phase 8 顺手测一下。
+
+**追踪表**（Phase 8 跑 fixture 时按此 6 条逐条核：勾选 / 偏离 / 修代码）：
+
+| # | 假设 | 状态 | 备注 |
+|---|------|------|------|
+| 1 | NaN cell seed → 1-pixel crown | unverified | spec 行为描述需补 |
+| 2 | 同像素两 seed → last wins | unverified | Phase 8 fixture |
+| 3 | 相邻 crown 抢像素 → row-major-last | unverified | Phase 8 fixture |
+| 4 | ~~NaN/Inf seed XY → silently drop~~ | **resolved** | `_validate` 加 finite 检查；lidR-aligned |
+| 5 | ~~负 id / id=0 通过校验~~ | **resolved** | `_validate` 要求 id ≥ 1；spec-aligned |
+| 6 | `max_cr` 截断精确边界 | unverified | Phase 8 parametrise |
+| 7 | seeds[:, 2] z 列忽略 | known, doc 缺 | Phase 4 顺手补 docstring |
+| 8 | `th_tree=0` 全连通增长 | unverified | low pri |
+
 ## Risks（spec §13，实施时关注）
 
 - silva2016 R→C++ 翻译可能引入语义偏差 → Phase 4 mid-phase 用户审翻译笔记 + v0.2 fixture 容差兜底

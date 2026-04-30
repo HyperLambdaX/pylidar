@@ -22,11 +22,17 @@ from typing import Optional, Tuple
 import numpy as np
 
 from . import _core
-from ._validate import ensure_chm_float64, ensure_transform, ensure_xyz_float64
+from ._validate import (
+    ensure_chm_float64,
+    ensure_seeds_xyzid,
+    ensure_transform,
+    ensure_xyz_float64,
+)
 
 __all__ = [
     "locate_trees_lmf_chm",
     "locate_trees_lmf_points",
+    "segment_dalponte2016",
     "smooth_height",
 ]
 
@@ -217,3 +223,80 @@ def locate_trees_lmf_chm(
     ws, hmin = _check_ws_hmin(ws, hmin)
     shape_int = _resolve_shape(shape)
     return _core.lmf_chm(chm, ox, oy, ps, ws, hmin, shape_int)
+
+
+def segment_dalponte2016(
+    chm: np.ndarray,
+    transform: Tuple[float, float, float],
+    seeds: np.ndarray,
+    th_tree: float = 2.0,
+    th_seed: float = 0.45,
+    th_cr: float = 0.55,
+    max_cr: float = 10.0,
+) -> np.ndarray:
+    """Region-grow individual tree crowns on a CHM from seed tree tops.
+
+    Direct port of lidR ``dalponte2016`` (``R/algorithm-its.R`` +
+    ``src/C_dalponte2016.cpp``).
+
+    Parameters
+    ----------
+    chm : np.ndarray
+        (H, W) float64, C-contiguous, row-major. NaN cells are masked.
+    transform : tuple of (origin_x, origin_y, pixel_size)
+        Spec §6.1: ``origin_*`` is the world XY of pixel ``(row=0,
+        col=0)``; row 0 is the northern edge (largest y).
+    seeds : np.ndarray
+        ``(M, 3)`` float64 (x, y, z) — IDs are auto-assigned 1..M; or
+        ``(M, 4)`` (x, y, z, id) for caller-supplied IDs. ``M == 0`` is
+        allowed and yields an all-zero crown raster.
+    th_tree : float, default 2.0
+        Absolute height threshold — pixels at or below this never join a
+        crown.
+    th_seed : float, default 0.45
+        Neighbour z must exceed ``th_seed * h_seed`` to be added. Domain
+        ``[0, 1]``.
+    th_cr : float, default 0.55
+        Neighbour z must exceed ``th_cr * mean_crown_z`` to be added.
+        Domain ``[0, 1]``.
+    max_cr : float, default 10.0
+        Max Chebyshev pixel distance from the seed to a grown crown
+        pixel. Must be > 0.
+
+    Returns
+    -------
+    np.ndarray
+        ``(H, W)`` int32 crown label raster. ``0`` = no tree, otherwise
+        the seed ID.
+
+    Raises
+    ------
+    TypeError
+        If ``chm`` or ``seeds`` is not a numpy array, or its dtype is
+        not float64.
+    ValueError
+        On bad CHM/transform/seeds shape, ``th_seed``/``th_cr`` outside
+        ``[0, 1]``, or non-positive ``max_cr``.
+    """
+    chm = ensure_chm_float64(chm)
+    ox, oy, ps = ensure_transform(transform)
+    seeds = ensure_seeds_xyzid(seeds)
+
+    th_seed = float(th_seed)
+    th_cr   = float(th_cr)
+    th_tree = float(th_tree)
+    max_cr  = float(max_cr)
+    if not (0.0 <= th_seed <= 1.0):
+        raise ValueError(f"th_seed must be in [0, 1], got {th_seed}")
+    if not (0.0 <= th_cr <= 1.0):
+        raise ValueError(f"th_cr must be in [0, 1], got {th_cr}")
+    if not math.isfinite(th_tree):
+        raise ValueError(f"th_tree must be a finite number, got {th_tree}")
+    if not math.isfinite(max_cr) or max_cr <= 0.0:
+        raise ValueError(
+            f"max_cr must be a finite positive number, got {max_cr}"
+        )
+
+    return _core.dalponte2016(
+        chm, ox, oy, ps, seeds, th_seed, th_cr, th_tree, max_cr
+    )

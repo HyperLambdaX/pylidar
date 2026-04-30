@@ -24,6 +24,7 @@ from ._core import set_log_callback
 from .segmentation import (
     locate_trees_lmf_chm,
     locate_trees_lmf_points,
+    segment_dalponte2016,
     smooth_height,
 )
 
@@ -33,6 +34,7 @@ __all__ = [
     "__version__",
     "locate_trees_lmf_chm",
     "locate_trees_lmf_points",
+    "segment_dalponte2016",
     "set_log_callback",
     "smooth_height",
 ]
