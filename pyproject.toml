@@ -28,6 +28,10 @@ dev = [
     "scikit-build-core>=0.10",
     "nanobind>=2.4",
     "ninja>=1.11",
+    # LAZ decompression backend for laspy. Used by examples/its_demo.py to
+    # consume the compressed LiDAR samples shipped by lidR; main pylidar
+    # algorithms don't depend on it.
+    "lazrs>=0.6",
 ]
 
 [tool.scikit-build]

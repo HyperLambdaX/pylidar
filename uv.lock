@@ -46,6 +46,20 @@ wheels = [
 ]
 
 [[package]]
+name = "lazrs"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fd/b8/a6a4f4529410c4f74caeced017e905e886e1dd516d9ea00d02c41780a86b/lazrs-0.8.1.tar.gz", hash = "sha256:2be2d481b6ba3e483195012f7a7aebee7898e8688a696448bf3922ef0c7c2f41", size = 9857, upload-time = "2025-12-21T17:55:10.73Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/f8/6f57fa9638dd00bb27e7f477700a92b6b827f95132e2f7accc0777205d75/lazrs-0.8.1-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:fca5c70d79693bc812dcf2c8c8c45d2c324a86add58d6232e7085e6d9a3ee7eb", size = 588761, upload-time = "2025-12-21T17:55:01.121Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/e0/8a1fad2fd942e45ae472cc913a5f83eaab5736101b249ed8525e1ed9e731/lazrs-0.8.1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:70c2b2599736960f5309d9be8538ab5b4cad7a592c6fc03fbba96d2de4774a94", size = 586869, upload-time = "2025-12-21T17:55:02.836Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/29/bf381532256940b6bcedaea47eb4d7d1d1ce4b96aea2fb4a1e982f422759/lazrs-0.8.1-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ea4424d6e7f6f347c2432a9a53ad14116523a77f7f7b4e750ed971bf400038e1", size = 647652, upload-time = "2025-12-21T17:55:04.56Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/fd/ead330b675f3d3b62c810ec57f058b135ac5ad55351346cfda540dd6f51f/lazrs-0.8.1-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:93de9e974b99ccbd634545eb3daf3bb968eb3f2c7ef175f67f6b3a3d05fb6dcc", size = 648273, upload-time = "2025-12-21T17:55:06.661Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/9b/462f85a32bc41f833a2a80d55310d15edaef2fd5c29c1fb7c72e3a46559d/lazrs-0.8.1-cp314-cp314-win32.whl", hash = "sha256:ba53115c872adcd7fbfd2da7eb6f4fbb60962aaef13452898657c050bc1e1cf6", size = 413575, upload-time = "2025-12-21T17:55:08.137Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/f8/3b0d84c67c516ae0b2d3c2d2380c3d9613ab8f5f8ce14b166b457ce4ba57/lazrs-0.8.1-cp314-cp314-win_amd64.whl", hash = "sha256:a73abf82257b4d9e0636468b9ee7f191af07b571500c03a7565a930fe8907839", size = 424721, upload-time = "2025-12-21T17:55:09.714Z" },
+]
+
+[[package]]
 name = "lazy-loader"
 version = "0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -221,6 +235,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "lazrs" },
     { name = "nanobind" },
     { name = "ninja" },
     { name = "pytest" },
@@ -231,6 +246,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "laspy", specifier = ">=2.5" },
+    { name = "lazrs", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "nanobind", marker = "extra == 'dev'", specifier = ">=2.4" },
     { name = "ninja", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "numpy", specifier = ">=2.1" },
