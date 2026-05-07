@@ -1,7 +1,7 @@
 add_library(pylidar_core_its STATIC
     dalponte2016.cpp
-    # li2012.cpp              # M2
-    # lmf.cpp                 # M2
+    li2012.cpp
+    lmf.cpp
     # chm_smooth.cpp          # M3
 )
 target_link_libraries(pylidar_core_its PUBLIC pylidar_core_common)
