@@ -1,6 +1,5 @@
 add_library(pylidar_core_its STATIC
-    _placeholder.cpp
-    # dalponte2016.cpp        # M1
+    dalponte2016.cpp
     # li2012.cpp              # M2
     # lmf.cpp                 # M2
     # chm_smooth.cpp          # M3
