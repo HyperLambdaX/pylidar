@@ -8,6 +8,7 @@ wheels/
 *.so
 *.pyd
 .pytest_cache/
+.benchmarks/
 
 # Virtual environments
 .venv/
@@ -36,6 +37,10 @@ findings.md
 progress.md
 .planning/
 .plan-attestation
+
+# Internal spec / planning docs (kept locally only)
+rd.md
+docs/superpowers/specs/
 
 # scikit-build-core editable redirect cache
 _skbuild/
