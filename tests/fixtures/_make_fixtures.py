@@ -771,6 +771,422 @@ def fx_lmf_chm_corner_tie_equal_neighbors() -> dict:
     }
 
 
+# --- chm_smooth fixtures -----------------------------------------------------
+
+def fx_chm_smooth_happy() -> dict:
+    """5-point circular average with size=2 (hws=1).
+
+    Hand-trace (each point includes itself per lidR's tree.lookup; neighbour
+    in disc iff d² ≤ hws² + EPSILON, hws=1, EPSILON=1e-8):
+
+      p0(0,0,10): p1 d²=0.25 ✓; p4 d²=2 ✗; p2 d²=4 ✗; p3 d²=9 ✗.
+                  neighbours {p0,p1}, mean = (10+8)/2 = 9.
+      p1(0.5,0,8): p0 d²=0.25 ✓; p4 d²=1.25 ✗; p2 d²=2.25 ✗; p3 d²=9.25 ✗.
+                  neighbours {p0,p1}, mean = 9.
+      p2(2,0,7):  no other point within disc (p1 d²=2.25, p4 d²=2, p0 d²=4,
+                  p3 d²=13). neighbours {p2}, mean = 7.
+      p3(0,3,5):  no other within disc (p0 d²=9, p4 d²=5).
+                  neighbours {p3}, mean = 5.
+      p4(1,1,4):  no other within disc (p0 d²=2, p1 d²=1.25, p2 d²=2,
+                  p3 d²=5). neighbours {p4}, mean = 4.
+    """
+    xyz = np.array([
+        [0.0, 0.0, 10.0],
+        [0.5, 0.0,  8.0],
+        [2.0, 0.0,  7.0],
+        [0.0, 3.0,  5.0],
+        [1.0, 1.0,  4.0],
+    ], dtype=np.float64)
+    expected = np.array([9.0, 9.0, 7.0, 5.0, 4.0], dtype=np.float64)
+    return {
+        "inputs/xyz":     xyz,
+        "inputs/size":    np.float64(2.0),
+        "inputs/method":  "average",
+        "inputs/shape":   "circular",
+        "inputs/sigma":   np.float64(2.0 / 6.0),  # lidR R-side default
+        "expected/z":     expected,
+        "meta/source": "manual_derivation: lidR/src/LAS.cpp:112-179 (z_smooth)",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "Circular average smoothing on 5 points; verifies self-inclusion "
+            "and EPSILON-inclusive disc test."
+        ),
+    }
+
+
+def fx_chm_smooth_degenerate_single_point() -> dict:
+    """Single point ⇒ smoothed value equals raw z (only self in window)."""
+    xyz = np.array([[0.0, 0.0, 5.0]], dtype=np.float64)
+    expected = np.array([5.0], dtype=np.float64)
+    return {
+        "inputs/xyz":     xyz,
+        "inputs/size":    np.float64(2.0),
+        "inputs/method":  "average",
+        "inputs/shape":   "circular",
+        "inputs/sigma":   np.float64(1.0),
+        "expected/z":     expected,
+        "meta/source": "manual_derivation: lidR/src/LAS.cpp:148-167",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": "Single point: weighted mean of its single neighbour (itself).",
+    }
+
+
+def fx_chm_smooth_corner_gaussian() -> dict:
+    """Two-point Gaussian weighted mean, exact analytic formula.
+
+    xyz = (0,0,10), (1,0,8). size=4 ⇒ hws=2, r²=4 (both points within
+    each other's disc). sigma=1 ⇒ 2σ²=2, 2σ²π=2π.
+
+      d²(p0,p1) = 1.
+      w_self = (1/(2π))·exp(0) = 1/(2π).
+      w_pair = (1/(2π))·exp(-1/2).
+
+      z0 = (w_self·10 + w_pair·8) / (w_self + w_pair)
+         = (10 + 8·e^(-1/2)) / (1 + e^(-1/2)).
+      z1 = (w_pair·10 + w_self·8) / (w_pair + w_self)
+         = (10·e^(-1/2) + 8) / (e^(-1/2) + 1).
+    """
+    xyz = np.array([
+        [0.0, 0.0, 10.0],
+        [1.0, 0.0,  8.0],
+    ], dtype=np.float64)
+    q = float(np.exp(-0.5))
+    z0 = (10.0 + q * 8.0) / (1.0 + q)
+    z1 = (q * 10.0 + 8.0) / (q + 1.0)
+    expected = np.array([z0, z1], dtype=np.float64)
+    return {
+        "inputs/xyz":     xyz,
+        "inputs/size":    np.float64(4.0),
+        "inputs/method":  "gaussian",
+        "inputs/shape":   "circular",
+        "inputs/sigma":   np.float64(1.0),
+        "expected/z":     expected,
+        "meta/source": "manual_derivation: lidR/src/LAS.cpp:158-167 (gaussian)",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "Gaussian weighting with explicit sigma. Symmetric around 9 — "
+            "closer to higher peak from each side."
+        ),
+    }
+
+
+def fx_chm_smooth_corner_circular_three_neighbors() -> dict:
+    """5 points, circular shape ⇒ multiple points with ≥3 neighbours each.
+
+    The base happy fixture only exercises 1-and-2-neighbour disc cases under
+    circular shape; the square-shape fixture covers 3-neighbour boxes but
+    not 3-neighbour discs. This locks the multi-neighbour circular average
+    path explicitly.
+
+    Hand-trace (size=2, hws=1, r²+EPS=1+1e-8, average, circular):
+
+      Layout (xy, z):
+        p0 ( 0.0,  0.0, 10)
+        p1 ( 0.5,  0.0,  8)
+        p2 (-0.5,  0.0,  6)
+        p3 ( 1.0,  1.0,  4)   far corner
+        p4 ( 0.4,  0.4,  5)
+
+      Pairwise d²:
+        p0–p1=0.25, p0–p2=0.25, p0–p3=2.0,  p0–p4=0.32,
+        p1–p2=1.0,  p1–p3=1.25, p1–p4=0.17,
+        p2–p3=3.25, p2–p4=0.97,
+        p3–p4=0.72.
+
+      In-disc (d² ≤ 1 + EPS):
+        p0: {p0, p1, p2, p4}             (4 neighbours)
+        p1: {p0, p1, p2, p4}             (4 neighbours; p1–p2=1 ≤ 1+EPS)
+        p2: {p0, p1, p2, p4}             (4; p2–p4=0.97 ≤ 1+EPS)
+        p3: {p3, p4}                     (2)
+        p4: {p0, p1, p2, p3, p4}         (5 — proves ≥3 disc path)
+
+      Means:
+        z0 = (10 + 8 + 6 + 5) / 4 = 7.25
+        z1 = (10 + 8 + 6 + 5) / 4 = 7.25
+        z2 = (10 + 8 + 6 + 5) / 4 = 7.25
+        z3 = (4  + 5)         / 2 = 4.5
+        z4 = (10 + 8 + 6 + 4 + 5) / 5 = 6.6
+    """
+    xyz = np.array([
+        [ 0.0,  0.0, 10.0],
+        [ 0.5,  0.0,  8.0],
+        [-0.5,  0.0,  6.0],
+        [ 1.0,  1.0,  4.0],
+        [ 0.4,  0.4,  5.0],
+    ], dtype=np.float64)
+    expected = np.array([7.25, 7.25, 7.25, 4.5, 6.6], dtype=np.float64)
+    return {
+        "inputs/xyz":     xyz,
+        "inputs/size":    np.float64(2.0),
+        "inputs/method":  "average",
+        "inputs/shape":   "circular",
+        "inputs/sigma":   np.float64(2.0 / 6.0),
+        "expected/z":     expected,
+        "meta/source": "manual_derivation: lidR/src/LAS.cpp:148-167 + Shapes.h:163-185",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "Multi-neighbour circular average: every point has at least 2 "
+            "and at most 5 in-disc neighbours; pins the ≥3-neighbour path "
+            "explicitly which the happy / square / gaussian fixtures do not."
+        ),
+    }
+
+
+def fx_chm_smooth_corner_nan_propagates() -> dict:
+    """lidR z_smooth (LAS.cpp:148-167) does not NaN-guard ⇒ a NaN
+    neighbour z poisons the running sum and the result is NaN. Pylidar
+    matches per the PORT NOTE (chm_smooth.cpp:12-16) and the wrapper
+    docstring (segmentation.py "NaN inputs are not guarded"). Without a
+    fixture, a future "helpful" `if std::isnan` guard slipped into
+    chm_smooth.cpp would silently break the lidR contract.
+
+    Hand-trace (size=2, hws=1, average, circular):
+      p0 (0.0, 0.0, 10): self ✓; p1 d²=0.25 ≤ 1 ✓ ⇒ neighbours {p0, p1}.
+        z0 = (10 + NaN) / 2 = NaN.
+      p1 (0.5, 0.0, NaN): self ✓; p0 d²=0.25 ✓ ⇒ neighbours {p0, p1}.
+        z1 = (NaN + 10) / 2 = NaN.
+    """
+    xyz = np.array([
+        [0.0, 0.0, 10.0],
+        [0.5, 0.0, np.nan],
+    ], dtype=np.float64)
+    expected = np.array([np.nan, np.nan], dtype=np.float64)
+    return {
+        "inputs/xyz":     xyz,
+        "inputs/size":    np.float64(2.0),
+        "inputs/method":  "average",
+        "inputs/shape":   "circular",
+        "inputs/sigma":   np.float64(2.0 / 6.0),
+        "expected/z":     expected,
+        "meta/source": "manual_derivation: lidR/src/LAS.cpp:148-167 (no NaN guard)",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "lidR has no NaN-guard; a NaN neighbour z propagates to NaN "
+            "output. This fixture pins the contract so a future NaN-guard "
+            "regression is caught."
+        ),
+    }
+
+
+def fx_chm_smooth_corner_square_shape() -> dict:
+    """Square shape includes corner offsets (1,1) that circular shape excludes.
+
+    xyz = (0,0,10), (1,1,8), (2,0,5). size=2 ⇒ hws=1.
+    Square box [-1,1]×[-1,1]; circular disc r²=1.
+      Square:
+        p0(0,0): p1 (|1|,|1|) ≤ hws+EPSILON ✓; p2 (|2|,0) ✗.
+                 neigh={p0,p1}, mean=(10+8)/2=9.
+        p1(1,1): p0 (|1|,|1|) ✓; p2 (|1|,|1|) ✓.
+                 neigh={p0,p1,p2}, mean=(10+8+5)/3=23/3.
+        p2(2,0): p1 (|1|,|1|) ✓; p0 (|2|,0) ✗.
+                 neigh={p1,p2}, mean=(8+5)/2=6.5.
+      For circular at the same hws=1 (NOT the test path, just for contrast):
+        p0,p1,p2 all have d²=2 between any pair → only self in disc → no
+        smoothing. Output would be [10,8,5]. The square branch result
+        [9, 23/3, 6.5] therefore pins the post-filter logic.
+    """
+    xyz = np.array([
+        [0.0, 0.0, 10.0],
+        [1.0, 1.0,  8.0],
+        [2.0, 0.0,  5.0],
+    ], dtype=np.float64)
+    expected = np.array([9.0, 23.0 / 3.0, 6.5], dtype=np.float64)
+    return {
+        "inputs/xyz":     xyz,
+        "inputs/size":    np.float64(2.0),
+        "inputs/method":  "average",
+        "inputs/shape":   "square",
+        "inputs/sigma":   np.float64(2.0 / 6.0),
+        "expected/z":     expected,
+        "meta/source": "manual_derivation: lidR/inst/include/lidR/Shapes.h:71-86 + LAS.cpp:139",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "Square box covers the (1,1) corners that circular ws=2 disc "
+            "excludes. Pins the square post-filter in chm_smooth.cpp."
+        ),
+    }
+
+
+# --- watershed fixtures ------------------------------------------------------
+
+def fx_watershed_happy() -> dict:
+    """Two peaks in disjoint mask regions ⇒ each gets its own basin.
+
+    chm:
+      [0 0 0 0 0]
+      [0 9 6 0 0]
+      [0 6 0 0 0]
+      [0 0 0 7 0]
+      [0 0 0 0 0]
+
+    th_tree=2, tol=1.
+    canopy = chm (no NaN, no <2 substitution needed beyond what mask already
+    handles). mask = canopy > 0 = {(1,1),(1,2),(2,1),(3,3)}; the (1,1)
+    cluster and (3,3) are disjoint in the mask.
+
+    h_maxima(canopy, h=1) — output regional maxima of canopy with prominence
+    ≥ tol=1:
+      (1,1)=9: max neighbour=6 ⇒ prom=3 ≥1 ✓.
+      (1,2)=6, (2,1)=6: max neighbour=9 (higher) ⇒ NOT regional max.
+      (3,3)=7: all canopy neighbours=0 ⇒ prom=7 ≥1 ✓.
+    peaks = {(1,1),(3,3)}.
+    ndi.label assigns row-major: 1→(1,1), 2→(3,3).
+
+    watershed(-canopy, markers, mask=canopy>0):
+      Initial heap: priorities -9, -7. Pop -9 (1,1)→1; enqueue (1,2)=-6
+      age2 label1, (2,1)=-6 age3 label1. Pop -7 (3,3)→2; no neighbours in
+      mask. Pop -6 (1,2)→1. Pop -6 (2,1)→1. Done. No ties at any step.
+
+    Expected labels:
+      [[0,0,0,0,0],
+       [0,1,1,0,0],
+       [0,1,0,0,0],
+       [0,0,0,2,0],
+       [0,0,0,0,0]]
+    """
+    chm = np.array([
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 9.0, 6.0, 0.0, 0.0],
+        [0.0, 6.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 7.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+    ], dtype=np.float64)
+    expected = np.array([
+        [0, 0, 0, 0, 0],
+        [0, 1, 1, 0, 0],
+        [0, 1, 0, 0, 0],
+        [0, 0, 0, 2, 0],
+        [0, 0, 0, 0, 0],
+    ], dtype=np.int32)
+    return {
+        "inputs/chm":     chm,
+        "inputs/th_tree": np.float64(2.0),
+        "inputs/tol":     np.float64(1.0),
+        "expected/labels": expected,
+        "meta/source": (
+            "manual_derivation: lidR/R/algorithm-its.R:328-377 (watershed) + "
+            "skimage.morphology.h_maxima + skimage.segmentation.watershed"
+        ),
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "Two peaks in DISJOINT mask regions ⇒ deterministic watershed "
+            "result regardless of heap tie-breaking. Pins basic pipeline."
+        ),
+    }
+
+
+def fx_watershed_degenerate_below_th_tree() -> dict:
+    """Every cell below th_tree ⇒ mask empty ⇒ short-circuit to all zeros."""
+    chm = np.full((3, 3), 1.0, dtype=np.float64)
+    expected = np.zeros((3, 3), dtype=np.int32)
+    return {
+        "inputs/chm":     chm,
+        "inputs/th_tree": np.float64(2.0),
+        "inputs/tol":     np.float64(1.0),
+        "expected/labels": expected,
+        "meta/source": "manual_derivation: lidR/R/algorithm-its.R:360-364",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": "All cells z<th_tree ⇒ canopy=0 ⇒ mask empty ⇒ output all 0.",
+    }
+
+
+def fx_watershed_corner_tol_gates_low_peak() -> dict:
+    """tol=2 suppresses a low peak connected to a higher peak via a saddle.
+
+    chm:
+      [0 0 0 0 0]
+      [0 3 2 5 0]
+      [0 0 0 0 0]
+
+    th_tree=2, tol=2. canopy = chm; mask = {(1,1)=3, (1,2)=2, (1,3)=5}
+    (all three connected through (1,2)).
+
+    h_maxima(canopy, h=2) — keep regional maxima whose **dynamic** ≥ h:
+      Dynamic(M) = f(M) - g(M), where g(M) is the saddle value on the
+      lowest path from M to any strictly-higher maximum.
+      (1,1)=3: path to (1,3)=5 via (1,2)=2 ⇒ saddle=2 ⇒ dynamic=1 < 2
+              ⇒ NOT kept. (Suppressed because tol exceeds prominence.)
+      (1,3)=5: no higher max ⇒ dynamic=∞ ≥ 2 ⇒ kept.
+    peaks = {(1,3)}; markers: label 1 at (1,3).
+
+    watershed(-canopy, markers, mask=canopy>0): from (1,3) flood the
+    full connected mask region.
+      Pop -5 (1,3) → label 1. Enqueue (1,2)=-2 age2 label1.
+      Pop -2 (1,2) → label 1. Enqueue (1,1)=-3 age3 label1.
+      Pop -3 (1,1) → label 1.
+    All three cells get label 1 — the low peak's basin is absorbed into
+    the higher peak's basin because tol gated the low peak's marker.
+
+    Expected:
+      [[0,0,0,0,0],
+       [0,1,1,1,0],
+       [0,0,0,0,0]]
+    """
+    chm = np.array([
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 3.0, 2.0, 5.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+    ], dtype=np.float64)
+    expected = np.array([
+        [0, 0, 0, 0, 0],
+        [0, 1, 1, 1, 0],
+        [0, 0, 0, 0, 0],
+    ], dtype=np.int32)
+    return {
+        "inputs/chm":     chm,
+        "inputs/th_tree": np.float64(2.0),
+        "inputs/tol":     np.float64(2.0),
+        "expected/labels": expected,
+        "meta/source": "manual_derivation: skimage.morphology.h_maxima (dynamic gate)",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "Connected-via-saddle topology: (1,1)=3 reaches (1,3)=5 through "
+            "saddle=2, so its dynamic=1 is suppressed by tol=2. The single "
+            "surviving marker absorbs the whole connected mask region."
+        ),
+    }
+
+
+def fx_watershed_corner_nan_treated_as_no_tree() -> dict:
+    """NaN cells treated identically to below-th_tree: masked out, output 0.
+
+    Two well-separated peaks with NaN scattered in the would-be background.
+    Verifies the wrapper's `np.isnan(chm) | (chm < th_tree)` masking line.
+
+    chm:
+      [NaN  0   0   0   0  ]
+      [0   8.0  0   NaN 0  ]
+      [0    0   0   0   0  ]
+      [0    0   0  6.0  0  ]
+      [0    0   0   0   0  ]
+
+    Mask covers only (1,1)=8, (3,3)=6 (NaN and zero alike are masked).
+    Each peak ⇒ regional max with high prominence ≥ tol=1.
+    Expected: 1 at (1,1), 2 at (3,3).
+    """
+    chm = np.zeros((5, 5), dtype=np.float64)
+    chm[0, 0] = np.nan
+    chm[1, 3] = np.nan
+    chm[1, 1] = 8.0
+    chm[3, 3] = 6.0
+    expected = np.zeros((5, 5), dtype=np.int32)
+    expected[1, 1] = 1
+    expected[3, 3] = 2
+    return {
+        "inputs/chm":     chm,
+        "inputs/th_tree": np.float64(2.0),
+        "inputs/tol":     np.float64(1.0),
+        "expected/labels": expected,
+        "meta/source": "manual_derivation: lidR/R/algorithm-its.R:360 (NA mask)",
+        "meta/lidR_commit_ref": "TBD: regen with R env",
+        "meta/notes": (
+            "NaN cells go through the same `mask <- chm < th_tree | is.na(chm)` "
+            "path as below-th_tree cells. Two disjoint isolated peaks ⇒ "
+            "deterministic two-tree output."
+        ),
+    }
+
+
 FIXTURES = {
     "dalponte2016_happy":       fx_dalponte2016_happy,
     "dalponte2016_degenerate":  fx_dalponte2016_degenerate,
@@ -792,6 +1208,16 @@ FIXTURES = {
     "lmf_chm_degenerate_all_below_hmin":          fx_lmf_chm_degenerate_all_below_hmin,
     "lmf_chm_corner_tie_equal_neighbors":         fx_lmf_chm_corner_tie_equal_neighbors,
     "lmf_chm_corner_square_shape":                fx_lmf_chm_corner_square_shape,
+    "chm_smooth_happy":                           fx_chm_smooth_happy,
+    "chm_smooth_degenerate_single_point":         fx_chm_smooth_degenerate_single_point,
+    "chm_smooth_corner_gaussian":                 fx_chm_smooth_corner_gaussian,
+    "chm_smooth_corner_square_shape":             fx_chm_smooth_corner_square_shape,
+    "chm_smooth_corner_circular_three_neighbors": fx_chm_smooth_corner_circular_three_neighbors,
+    "chm_smooth_corner_nan_propagates":           fx_chm_smooth_corner_nan_propagates,
+    "watershed_happy":                            fx_watershed_happy,
+    "watershed_degenerate_below_th_tree":         fx_watershed_degenerate_below_th_tree,
+    "watershed_corner_tol_gates_low_peak":        fx_watershed_corner_tol_gates_low_peak,
+    "watershed_corner_nan_treated_as_no_tree":    fx_watershed_corner_nan_treated_as_no_tree,
 }
 
 

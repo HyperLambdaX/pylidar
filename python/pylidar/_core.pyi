@@ -42,3 +42,14 @@ def lmf_chm(
     hmin: float = 2.0,
     shape: str = "circular",
 ) -> NDArray[np.int32]: ...
+
+def chm_smooth(
+    *,
+    xyz: NDArray[np.float64],
+    size: float,
+    method: str,
+    shape: str,
+    sigma: float,
+) -> NDArray[np.float64]: ...
+# Internal entry; no defaults. User-facing defaults live in
+# `pylidar.segmentation.chm_smooth`.

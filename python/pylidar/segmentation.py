@@ -11,10 +11,22 @@ from typing import Callable, Union
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import ndimage as ndi
+from scipy.spatial import cKDTree
+from skimage.morphology import h_maxima, local_maxima
+from skimage.segmentation import watershed as _ski_watershed
 
 from . import _core
 
-__all__ = ["dalponte2016", "silva2016", "li2012", "lmf_points", "lmf_chm"]
+__all__ = [
+    "dalponte2016",
+    "silva2016",
+    "li2012",
+    "lmf_points",
+    "lmf_chm",
+    "chm_smooth",
+    "watershed",
+]
 
 
 def dalponte2016(
@@ -104,8 +116,6 @@ def silva2016(
     a tree. Outputs may therefore differ slightly from lidR running on a
     CHM derived from the same scene.
     """
-    from scipy.spatial import cKDTree
-
     # Spec §3 mandates dtype/shape/contig checks at the bindings entry. For
     # this pure-Python algorithm, the public function entry plays that role,
     # so checks mirror the strictness of nanobind's `.noconvert()` over in
@@ -324,3 +334,182 @@ def lmf_chm(
     if shape not in ("circular", "square"):
         raise ValueError("lmf_chm: shape must be 'circular' or 'square'")
     return _core.lmf_chm(chm=chm, ws=float(ws), hmin=hmin, shape=shape)
+
+
+def chm_smooth(
+    *,
+    xyz: NDArray[np.float64],
+    size: float = 3.0,
+    method: str = "average",
+    shape: str = "circular",
+    sigma: float | None = None,
+) -> NDArray[np.float64]:
+    """Point-cloud height smoothing (lidR ``smooth_height``).
+
+    1:1 translation of ``lidR/src/LAS.cpp::z_smooth`` (line 112). For each
+    input point i, neighbours within a circular disc (radius ``size/2``)
+    or square box (half-side ``size/2``) of (x_i, y_i) — including i
+    itself — contribute to a weighted mean of z; the mean replaces z_i in
+    the output.
+
+    Parameters
+    ----------
+    xyz : (N, 3) float64 ndarray, C-contiguous
+        Point cloud.
+    size : float, default 3.0
+        Full window size (full diameter for ``shape='circular'``, full
+        side length for ``shape='square'``).
+    method : {'average', 'gaussian'}
+        ``'average'`` weights every neighbour equally; ``'gaussian'``
+        weights by ``(1 / (2σ²π)) · exp(-d² / (2σ²))`` where d is the
+        xy-plane distance to the query point and σ is ``sigma``.
+    shape : {'circular', 'square'}
+        Window shape.
+    sigma : float | None, default None → ``size / 6``
+        Standard deviation of the Gaussian kernel (used only when
+        ``method == 'gaussian'``). The default mirrors lidR's R-side
+        wrapper (``smooth_height.R:34``: ``sigma = size/6``); spec §3
+        omits sigma but a Gaussian smoother needs it, so we expose it
+        with the lidR R default — see findings.md.
+
+    Returns
+    -------
+    (N,) float64 ndarray
+        Smoothed z column. ``out[i]`` is the weighted mean of the z
+        values of all neighbours of point i (point i included).
+
+    Notes
+    -----
+    Per lidR's algorithm, NaN inputs are not guarded — a NaN neighbour z
+    propagates a NaN into the output. Filter NaNs upstream if needed.
+
+    The R-side wrapper ``smooth_height.R:45`` has a known typo
+    (``if (method == "circle")`` instead of ``if (shape == "circle")``)
+    that effectively forces ``shape='circular'`` in lidR regardless of
+    the user's argument. This port translates the C function directly,
+    so ``shape`` is honoured.
+    """
+    if not isinstance(xyz, np.ndarray):
+        raise TypeError("chm_smooth: xyz must be a numpy ndarray")
+    if xyz.dtype != np.float64:
+        raise TypeError("chm_smooth: xyz must be float64")
+    if xyz.ndim != 2 or xyz.shape[1] != 3:
+        raise ValueError("chm_smooth: xyz must have shape (N, 3)")
+    if not xyz.flags.c_contiguous:
+        raise ValueError("chm_smooth: xyz must be C-contiguous")
+    if not (size > 0.0):
+        raise ValueError("chm_smooth: size must be > 0")
+    if method not in ("average", "gaussian"):
+        raise ValueError("chm_smooth: method must be 'average' or 'gaussian'")
+    if shape not in ("circular", "square"):
+        raise ValueError("chm_smooth: shape must be 'circular' or 'square'")
+
+    if sigma is None:
+        sigma = size / 6.0
+    if not (sigma > 0.0):
+        raise ValueError("chm_smooth: sigma must be > 0")
+
+    return _core.chm_smooth(
+        xyz=xyz, size=float(size), method=method, shape=shape,
+        sigma=float(sigma),
+    )
+
+
+def watershed(
+    *,
+    chm: NDArray[np.float64],
+    th_tree: float = 2.0,
+    tol: float = 1.0,
+) -> NDArray[np.int32]:
+    """Watershed-based crown segmentation on a CHM.
+
+    Adapted from ``lidR/R/algorithm-its.R::watershed`` (line 328). lidR
+    delegates to ``EBImage::watershed``; we substitute scikit-image's
+    morphology + watershed pipeline with the closest semantic mapping:
+
+    - ``tol`` ↔ ``EBImage::watershed`` tolerance: minimum prominence of a
+      regional maximum to count as a separate basin. Implemented via
+      ``skimage.morphology.h_maxima(canopy, h=tol)`` which selects
+      regional maxima whose intensity exceeds the surrounding plateau by
+      at least ``tol``.
+    - Flooding: ``skimage.segmentation.watershed(-canopy, markers,
+      mask=canopy > 0)`` floods basins of the negated CHM (i.e. peaks of
+      the original CHM) restricted to the above-threshold mask.
+
+    EBImage's ``ext`` parameter (default 1) is not exposed — scikit-image
+    uses a fixed structuring element for ``h_maxima`` and the default
+    full N-D connectivity for ``watershed``. Spec §3 signature omits
+    ``ext`` accordingly.
+
+    Parameters
+    ----------
+    chm : (H, W) float64 ndarray
+        Canopy height model in meters. NaN cells are treated as below
+        ``th_tree`` (no tree).
+    th_tree : float, default 2.0
+        Cells with ``chm < th_tree`` (or NaN) are masked out (returned as
+        0 in the output) and excluded from the watershed.
+    tol : float, default 1.0
+        Minimum height contrast for a regional maximum to seed a
+        distinct basin.
+
+    Returns
+    -------
+    (H, W) int32 ndarray
+        Tree id per pixel: 0 = below ``th_tree`` / NaN / unassigned,
+        positive integers = tree ids (1-based, contiguous from 1).
+
+    Notes
+    -----
+    The output is **not** byte-for-byte identical to ``EBImage::watershed``
+    because the underlying watershed implementations differ. The fixtures
+    in ``tests/fixtures/watershed_*.npz`` are manually derived against the
+    skimage semantics described above; ``meta/source`` records the
+    derivation.
+    """
+    if not isinstance(chm, np.ndarray):
+        raise TypeError("watershed: chm must be a numpy ndarray")
+    if chm.dtype != np.float64:
+        raise TypeError("watershed: chm must be float64")
+    if chm.ndim != 2:
+        raise ValueError("watershed: chm must have shape (H, W)")
+    if not chm.flags.c_contiguous:
+        raise ValueError("watershed: chm must be C-contiguous")
+    if not (tol >= 0.0):
+        raise ValueError("watershed: tol must be >= 0")
+
+    h, w = chm.shape
+    # Treat NaN as below threshold; below-threshold cells form the
+    # excluded mask. Use 0 as the flooding floor for masked cells (matches
+    # lidR's `Canopy[mask] <- 0` at algorithm-its.R:361).
+    canopy = np.where(np.isnan(chm) | (chm < th_tree), 0.0, chm)
+    mask = canopy > 0
+
+    if not mask.any():
+        return np.zeros((h, w), dtype=np.int32)
+
+    # tol == 0 means "keep every regional maximum" (lidR / EBImage allow
+    # this). skimage's h_maxima rejects h=0 as ambiguous and points to
+    # local_maxima, which IS the right primitive for that case — it
+    # returns connected components of regional maxima. We special-case
+    # tol=0 explicitly so the user-facing tol >= 0 contract holds without
+    # leaking the skimage error.
+    # On a flat plateau h_maxima returns the whole plateau as one peak;
+    # that's harmless because we then label-and-watershed it.
+    if tol == 0.0:
+        peaks = local_maxima(canopy, allow_borders=True)
+    else:
+        peaks = h_maxima(canopy, h=tol)
+    markers, _ = ndi.label(peaks)
+    if markers.max() == 0:
+        return np.zeros((h, w), dtype=np.int32)
+
+    labels = _ski_watershed(-canopy, markers=markers, mask=mask)
+    out = labels.astype(np.int32, copy=False)
+    # Explicitly zero masked cells. skimage documents that pixels labelled
+    # 0 in `mask` are excluded from flooding, but we don't want our output
+    # contract to depend on a third-party library's fill convention for
+    # excluded cells — pin it locally so future skimage versions can't
+    # silently shift the meaning of 0 in the output.
+    out = np.where(mask, out, np.int32(0))
+    return out

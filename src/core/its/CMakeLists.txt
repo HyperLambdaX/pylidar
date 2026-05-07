@@ -2,7 +2,7 @@ add_library(pylidar_core_its STATIC
     dalponte2016.cpp
     li2012.cpp
     lmf.cpp
-    # chm_smooth.cpp          # M3
+    chm_smooth.cpp
 )
 target_link_libraries(pylidar_core_its PUBLIC pylidar_core_common)
 target_include_directories(pylidar_core_its PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

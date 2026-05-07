@@ -8,6 +8,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
 
+#include "chm_smooth.hpp"
 #include "dalponte2016.hpp"
 #include "li2012.hpp"
 #include "lmf.hpp"
@@ -17,12 +18,13 @@
 namespace nb = nanobind;
 using namespace nb::literals;
 
-using Float64Mat   = nb::ndarray<const double,  nb::numpy, nb::ndim<2>, nb::c_contig>;
-using Float64Vec   = nb::ndarray<const double,  nb::numpy, nb::ndim<1>, nb::c_contig>;
-using Int32Mat     = nb::ndarray<const int32_t, nb::numpy, nb::ndim<2>, nb::c_contig>;
-using Int32MatOut  = nb::ndarray<int32_t,       nb::numpy, nb::ndim<2>, nb::c_contig>;
-using Int32VecOut  = nb::ndarray<int32_t,       nb::numpy, nb::ndim<1>, nb::c_contig>;
-using BoolVecOut   = nb::ndarray<bool,          nb::numpy, nb::ndim<1>, nb::c_contig>;
+using Float64Mat    = nb::ndarray<const double,  nb::numpy, nb::ndim<2>, nb::c_contig>;
+using Float64Vec    = nb::ndarray<const double,  nb::numpy, nb::ndim<1>, nb::c_contig>;
+using Int32Mat      = nb::ndarray<const int32_t, nb::numpy, nb::ndim<2>, nb::c_contig>;
+using Int32MatOut   = nb::ndarray<int32_t,       nb::numpy, nb::ndim<2>, nb::c_contig>;
+using Int32VecOut   = nb::ndarray<int32_t,       nb::numpy, nb::ndim<1>, nb::c_contig>;
+using BoolVecOut    = nb::ndarray<bool,          nb::numpy, nb::ndim<1>, nb::c_contig>;
+using Float64VecOut = nb::ndarray<double,        nb::numpy, nb::ndim<1>, nb::c_contig>;
 
 namespace {
 
@@ -123,6 +125,20 @@ pylidar::core::its::LmfShape parse_shape(const std::string& s, const char* fn) {
         std::string(fn) + ": shape must be 'circular' or 'square'");
 }
 
+pylidar::core::its::SmoothShape parse_smooth_shape(const std::string& s) {
+    if (s == "circular") return pylidar::core::its::SmoothShape::Circular;
+    if (s == "square")   return pylidar::core::its::SmoothShape::Square;
+    throw std::invalid_argument(
+        "chm_smooth: shape must be 'circular' or 'square'");
+}
+
+pylidar::core::its::SmoothMethod parse_smooth_method(const std::string& s) {
+    if (s == "average")  return pylidar::core::its::SmoothMethod::Average;
+    if (s == "gaussian") return pylidar::core::its::SmoothMethod::Gaussian;
+    throw std::invalid_argument(
+        "chm_smooth: method must be 'average' or 'gaussian'");
+}
+
 BoolVecOut lmf_points_binding(Float64Mat xyz,
                               Float64Vec ws,
                               double hmin,
@@ -198,6 +214,45 @@ Int32MatOut lmf_chm_binding(Float64Mat chm,
     return Int32MatOut(out, 2, shape_arr, owner);
 }
 
+// ─────────────────── chm_smooth ───────────────────
+Float64VecOut chm_smooth_binding(Float64Mat xyz,
+                                 double size,
+                                 const std::string& method_str,
+                                 const std::string& shape_str,
+                                 double sigma) {
+    if (xyz.shape(1) != 3) {
+        throw std::invalid_argument("chm_smooth: xyz must have shape (N, 3)");
+    }
+    if (!(size > 0.0)) {
+        throw std::invalid_argument("chm_smooth: size must be > 0");
+    }
+    if (!(sigma > 0.0)) {
+        throw std::invalid_argument("chm_smooth: sigma must be > 0");
+    }
+    const auto method = parse_smooth_method(method_str);
+    const auto shape  = parse_smooth_shape(shape_str);
+
+    const std::size_t N = xyz.shape(0);
+    std::vector<pylidar::core::PointXYZ> pts(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        pts[i] = {xyz.data()[i * 3 + 0],
+                  xyz.data()[i * 3 + 1],
+                  xyz.data()[i * 3 + 2]};
+    }
+
+    std::vector<double> z_out;
+    pylidar::core::its::chm_smooth(pts, size, method, shape, sigma, z_out);
+
+    double* out = new double[N];
+    for (std::size_t i = 0; i < N; ++i) out[i] = z_out[i];
+
+    nb::capsule owner(out, [](void* p) noexcept {
+        delete[] static_cast<double*>(p);
+    });
+    std::size_t shape_arr[1] = {N};
+    return Float64VecOut(out, 1, shape_arr, owner);
+}
+
 }  // namespace
 
 NB_MODULE(_core, m) {
@@ -256,4 +311,23 @@ NB_MODULE(_core, m) {
           "chm:    (H, W) float64, C-contiguous.\n"
           "ws:     window size in **pixel** units (not world).\n"
           "Returns: (K, 2) int32 — (row, col) indices of detected maxima.");
+
+    m.def("chm_smooth", &chm_smooth_binding,
+          nb::kw_only(),
+          "xyz"_a.noconvert(),
+          "size"_a,
+          "method"_a,
+          "shape"_a,
+          "sigma"_a,
+          "Point-cloud height smoothing (lidR `smooth_height`).\n"
+          "Internal entry; user-facing defaults live in\n"
+          "`pylidar.segmentation.chm_smooth` (which defaults sigma to\n"
+          "size/6 to match lidR R's `smooth_height.R:34`). Direct callers\n"
+          "of this entry must pass every argument explicitly.\n"
+          "xyz:    (N, 3) float64, C-contiguous.\n"
+          "size:   full window size (diameter / side length).\n"
+          "method: 'average' (uniform) or 'gaussian' (sd = sigma).\n"
+          "shape:  'circular' or 'square'.\n"
+          "sigma:  Gaussian sd (used only when method == 'gaussian').\n"
+          "Returns: (N,) float64 smoothed z column.");
 }

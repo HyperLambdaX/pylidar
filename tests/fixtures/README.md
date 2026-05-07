@@ -19,7 +19,7 @@ uv run python tests/fixtures/_make_fixtures.py
 The Python generator preserves the hand-trace as code; running it just
 serializes the arrays and verifies each file is ≤ 50 KB (spec §6).
 
-## Inventory (M2)
+## Inventory (M3)
 
 | File | Algorithm | Class |
 |---|---|---|
@@ -43,3 +43,13 @@ serializes the arrays and verifies each file is ≤ 50 KB (spec §6).
 | `lmf_chm_degenerate_all_below_hmin.npz` | lmf_chm | degenerate: no CHM cells above hmin |
 | `lmf_chm_corner_tie_equal_neighbors.npz` | lmf_chm | corner: equal-neighbour tie-break |
 | `lmf_chm_corner_square_shape.npz` | lmf_chm | corner: square raster window branch |
+| `chm_smooth_happy.npz` | chm_smooth | happy path: circular average smoothing |
+| `chm_smooth_degenerate_single_point.npz` | chm_smooth | degenerate: single point smooths to itself |
+| `chm_smooth_corner_gaussian.npz` | chm_smooth | corner: analytic Gaussian weighted mean |
+| `chm_smooth_corner_square_shape.npz` | chm_smooth | corner: square window includes box corners |
+| `chm_smooth_corner_circular_three_neighbors.npz` | chm_smooth | corner: circular window with 3+ neighbours |
+| `chm_smooth_corner_nan_propagates.npz` | chm_smooth | corner: NaN neighbour propagates to output |
+| `watershed_happy.npz` | watershed | happy path: two disjoint crown basins |
+| `watershed_degenerate_below_th_tree.npz` | watershed | degenerate: all cells below th_tree |
+| `watershed_corner_tol_gates_low_peak.npz` | watershed | corner: tol suppresses saddle-connected low peak |
+| `watershed_corner_nan_treated_as_no_tree.npz` | watershed | corner: NaN cells are masked as no tree |
