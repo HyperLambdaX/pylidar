@@ -23,3 +23,23 @@ wheels/
 .agents/
 .claude/
 skills-lock.json
+
+# Per-agent guide files (kept locally for each tool's own consumption,
+# not shared via git — different machines / collaborators may want
+# different versions)
+CLAUDE.md
+AGENTS.md
+
+# planning-with-files scratch (per-session, not project content)
+task_plan.md
+findings.md
+progress.md
+.planning/
+.plan-attestation
+
+# scikit-build-core editable redirect cache
+_skbuild/
+
+# CMake user/build artifacts that may land outside build/
+CMakeUserPresets.json
+compile_commands.json

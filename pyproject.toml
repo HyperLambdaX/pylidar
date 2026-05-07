@@ -1,0 +1,47 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pylidar"
+version = "0.1.0"
+description = "Python port of lidR's individual tree segmentation algorithms"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "GPL-3.0-or-later" }
+dependencies = [
+    "numpy>=2.1",
+    "laspy>=2.5",
+    "scipy>=1.13",
+    "scikit-image>=0.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-benchmark>=4",
+    # Build toolchain kept in the venv so `--no-build-isolation` succeeds and
+    # `editable.rebuild = true` can re-invoke CMake on .cpp edits without
+    # spinning up a fresh PEP-517 build env each time. ninja is required at
+    # runtime by scikit-build-core's redirect-mode rebuild hook (CMake invokes
+    # `<venv>/bin/ninja` directly).
+    "scikit-build-core>=0.10",
+    "nanobind>=2.4",
+    "ninja>=1.11",
+]
+
+[tool.scikit-build]
+# Separate build dirs per scikit-build-core "state" (editable / wheel / sdist /
+# metadata_*). Otherwise wheel/use-mode builds (e.g. `uv build --wheel`,
+# `uv pip install .`) running in the same checkout would rewrite
+# `build/<wheel_tag>/CMakeCache.txt` with the temporary ninja path uv used
+# for that build (under ~/.cache/uv/builds-v0/.tmp*/bin/ninja). After the
+# isolated env is torn down, the next editable rebuild (triggered by
+# `import pylidar._core` after a .cpp edit) fails with ENOENT on that ninja.
+# Each state now owns its own CMakeCache.txt → no cross-contamination.
+build-dir = "build/{state}/{wheel_tag}"
+editable.rebuild = true
+editable.mode = "redirect"
+cmake.version = ">=3.26"
+cmake.build-type = "Release"
+wheel.packages = ["python/pylidar"]

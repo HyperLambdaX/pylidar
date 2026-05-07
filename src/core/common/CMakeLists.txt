@@ -1,0 +1,3 @@
+add_library(pylidar_core_common INTERFACE)
+target_include_directories(pylidar_core_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(pylidar_core_common INTERFACE cxx_std_17)

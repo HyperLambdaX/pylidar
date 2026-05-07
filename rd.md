@@ -4,14 +4,14 @@
 
 将 R 语言 `lidR` 包（本地：`/Users/lambdayin/Code-Projects/maicro_projects/3d/third_party/lidR`，上游：https://github.com/r-lidar/lidR）的单木分割（Individual Tree Segmentation, ITS）算法迁移到 Python 生态。
 
-**当前阶段目标：本地 Python 可调用即可，不发布 PyPI、不做多平台 wheel 分发。** 通过 `pip install -e .` 在本机以可编辑模式安装，能够 `import pylidar` 调用算法即视为完成。
+**当前阶段目标：本地 Python 可调用即可，不发布 PyPI、不做多平台 wheel 分发。** 在本机以可编辑模式安装（具体配方见 spec §5 "Dev 模式"，本期收敛为全程 `uv` 管理），能够 `import pylidar` 调用算法即视为完成。
 
 **核心策略：**
 - 算法核心层用纯 C++17 实现，去除所有 R/Rcpp 依赖
 - 通过 **nanobind** 暴露给 Python（相比 pybind11，二进制更小、编译更快、运行时开销更低）
 - **产物只有一个 Python 扩展模块** `pylidar/_core.<abi>.so`（editable install 直接放在源码树下），**只能通过 `import pylidar._core` 使用，不是可被其他 C++ 程序 link 的独立 dylib**——它只对 CPython 暴露 `PyInit__core` 入口，内部 C++ 函数不在导出符号表里。core 层 C++ 源码保持零 Python 依赖，是为了单元测试隔离 + 未来可移植，**不代表本期会单独输出 C++ 库**
-- 构建后端用 **scikit-build-core**，与 nanobind 配合，在 macOS 和 Linux 上都能本地 `pip install -e .` 编辑模式安装
-- **目标平台：macOS（Apple Silicon）+ Linux（Ubuntu）**，两个平台都要能本地 `pip install -e .` 跑通并通过测试；Windows 本期不支持。C++ 代码不调平台特有 API（POSIX 之外的能不用就不用），CMake 不硬编码平台路径或编译器
+- 构建后端用 **scikit-build-core**，与 nanobind 配合，在 macOS 和 Linux 上都能本地 editable 安装（具体命令见 spec §5）
+- **目标平台：macOS（Apple Silicon）+ Linux（Ubuntu）**，两个平台都要能本地装上并通过测试；Windows 本期不支持。C++ 代码不调平台特有 API（POSIX 之外的能不用就不用），CMake 不硬编码平台路径或编译器
 
 **当前阶段只迁移 ITS 相关算法**，但本期是 lidR 算法迁移的起点——后续会逐步迁入 lidR 中其他算法族（地面分割、DTM 插值、点云度量、波形处理等）。所以**目录结构和 CMake 构建从第一行代码就要为多算法族扩展打开口子**：
 
@@ -149,20 +149,25 @@ dependencies = [
 
 ```toml
 [tool.scikit-build]
-build-dir = "build/{wheel_tag}"
+# {state} 隔离 editable / wheel / sdist 的 CMakeCache.txt，避免 wheel/use 模式
+# 把 uv 临时构建环境的 ninja 路径污染共享 cache，破坏下次 editable rebuild。
+build-dir = "build/{state}/{wheel_tag}"
 editable.rebuild = true
 editable.mode = "redirect"
 cmake.version = ">=3.26"
 cmake.build-type = "Release"
 ```
 
-本地装：`pip install --no-build-isolation -e .`（**不**用 `uv pip install -e .`，详见下条）。
+本地装的具体命令配方收敛在 spec §5 "Dev 模式"，要点：
+- `uv sync --extra dev --no-install-project` 把 backend + ninja 灌进 venv 但跳过项目本身
+- `uv pip install --no-build-isolation -e ".[dev]"` 让构建复用 venv 内的 backend + ninja，CMake cache 烤进 `.venv/bin/ninja`，editable rebuild 钩子常驻可用
+- 跑测试：`uv run pytest -q`
 
 ### uv 的使用边界
 
-- `uv` 用于：管理 Python 解释器版本（`.python-version`）、虚拟环境（`.venv`）、纯 Python 依赖锁定
-- `uv` **不**用于：editable install C++ 扩展（uv 对 scikit-build-core 的 editable rebuild 钩子支持目前比 pip 弱，会出现 cpp 改了但模块没重编的迷惑现象）
-- 因此本地开发流程是混合的：`uv sync` → `pip install --no-build-isolation -e .`（在 uv 创建的 .venv 里）
+- `uv` 用于：管理 Python 解释器版本（`.python-version`）、虚拟环境（`.venv`）、依赖锁定（`uv.lock`）、运行命令（`uv run`）、editable install（**前提是配 `--no-build-isolation`**）
+- 历史注记（已修订）：早期评估认为 `uv pip install -e .` 与 scikit-build-core editable rebuild 钩子兼容性弱，需退回 vanilla pip。M0 实测发现该问题只在**带 build-isolation** 的路径出现（uv 在 `~/.cache/uv/builds-v0/.tmp*/bin/ninja` 临时目录里构建，CMake cache 烤死短命 ninja 路径，下次 import 触发 rebuild 时找不到）。配 `--no-build-isolation` + 把 backend 和 ninja 都放进 venv，CMake 走 venv 内稳定路径，`uv pip install -e` 完全可用。本期方案就是这条修订路径。
+- 完整推导见 spec §5 "本地开发流程" 末段。
 
 ### 跨平台前提
 
@@ -187,8 +192,8 @@ cmake.build-type = "Release"
 
 在 macOS 和 Ubuntu 任一平台（**两个平台都跑通即发版**）上：
 
-1. `pip install -e .` 成功，无平台特异编译错误
-2. `python -c "import pylidar"` 不报错
+1. spec §5 "Dev 模式" 三步配方成功，无平台特异编译错误
+2. `uv run python -c "import pylidar"` 不报错
 3. P0 算法（**dalponte2016 + silva2016**）端到端测试通过，输出与 lidR fixture 在 `np.allclose(rtol=1e-6)` 容差内一致
 
 ## 项目命名
