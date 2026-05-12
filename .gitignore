@@ -40,7 +40,9 @@ progress.md
 
 # Internal spec / planning docs (kept locally only)
 rd.md
+docs/*.md
 docs/superpowers/specs/
+docs/archive/
 
 # scikit-build-core editable redirect cache
 _skbuild/
