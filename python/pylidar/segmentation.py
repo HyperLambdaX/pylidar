@@ -26,6 +26,9 @@ __all__ = [
     "lmf_chm",
     "chm_smooth",
     "watershed",
+    # Phase 4 high-level wrappers (lidR-shape ITS API on top of Treetops):
+    "dalponte2016_from_treetops",
+    "silva2016_chm",
 ]
 
 
@@ -512,4 +515,230 @@ def watershed(
     # excluded cells — pin it locally so future skimage versions can't
     # silently shift the meaning of 0 in the output.
     out = np.where(mask, out, np.int32(0))
+    return out
+
+
+# ─────────────────────────────────────────────── Phase 4 high-level wrappers
+#
+# PORT NOTE (Phase 4, 2026-05-12)
+# -------------------------------
+# Adapted from lidR ``R/algorithm-its.R``: dalponte2016 high-level wrapper
+# (L59-146), silva2016 high-level wrapper (L203-283). The existing
+# :func:`dalponte2016` (a low-level seed-grid primitive) and
+# :func:`silva2016` (a point-cloud Voronoi adaptation) are preserved
+# unchanged — these new ``_from_treetops`` / ``_chm`` entry points sit on
+# top, taking a :class:`pylidar.locate_trees.Treetops` and returning an
+# (H, W) raster of tree IDs whose dtype matches ``treetops.tree_id.dtype``.
+#
+# Cell-collision policy for seed rasterization mirrors lidR: when two
+# treetops fall in the same cell, the **last one wins** (lidR uses
+# ``stars::st_rasterize`` with default last-write semantics). For the
+# common case of one treetop per cell this is moot.
+#
+# Output dtype mirrors lidR's ``storage.mode(val) <- storage.mode(treetops[[ID]])``
+# (``algorithm-its.R:139``): int32 raster for incremental tree IDs, float64
+# raster for gpstime/bitmerge. Unassigned cells are 0 for int32, 0.0 for
+# float64 (NOT NaN — lidR uses ``NA_integer_`` which we render as 0 to
+# match the existing pylidar output convention; downstream merge code
+# treats 0 as "no tree").
+
+def dalponte2016_from_treetops(
+    *,
+    chm: NDArray[np.float64],
+    layout,  # pylidar.raster.RasterLayout — kept untyped to avoid circular import
+    treetops,  # pylidar.locate_trees.Treetops
+    th_tree: float = 2.0,
+    th_seed: float = 0.45,
+    th_cr: float = 0.55,
+    max_cr: float = 10.0,
+) -> NDArray:
+    """Dalponte 2016 region-growing seeded by a Treetops table.
+
+    Mirrors lidR ``algorithm-its.R::dalponte2016`` (L118-140). Builds a
+    seed grid by rasterizing ``treetops.x/y`` onto ``layout`` (sequential
+    1..K seed values, last-wins for cell collisions), runs the C++
+    ``_core.dalponte2016`` kernel, then remaps each cell's sequential ID
+    back to ``treetops.tree_id`` so the output preserves the user's tree
+    ID space (incremental → int32, gpstime/bitmerge → float64).
+
+    Parameters
+    ----------
+    chm : (H, W) float64 ndarray
+        Canopy height model. NaN cells are treated as below ``th_tree``
+        for the kernel (substituted with ``-inf`` since the C kernel
+        compares against a height threshold, not a NaN-aware comparator).
+    layout : RasterLayout
+        Spatial extent for the CHM; used to map ``(x, y) → (row, col)``
+        for the seed grid.
+    treetops : Treetops
+        Detected treetops with the user's chosen ID space.
+    th_tree, th_seed, th_cr, max_cr : float
+        Forwarded to :func:`dalponte2016`.
+
+    Returns
+    -------
+    (H, W) ndarray
+        Tree-id raster, dtype matches ``treetops.tree_id.dtype``.
+        Unassigned cells are 0 (or 0.0 for float64).
+    """
+    # Local import to avoid circular module-load (locate_trees imports
+    # segmentation.lmf_points; segmentation.dalponte2016_from_treetops needs
+    # a Treetops only at call time, not at import time).
+    from .locate_trees import Treetops as _Treetops
+
+    if not isinstance(treetops, _Treetops):
+        raise TypeError("treetops must be a pylidar.locate_trees.Treetops")
+    if not isinstance(chm, np.ndarray):
+        raise TypeError("dalponte2016_from_treetops: chm must be a numpy ndarray")
+    if chm.dtype != np.float64:
+        raise TypeError("dalponte2016_from_treetops: chm must be float64")
+    if chm.ndim != 2:
+        raise ValueError("dalponte2016_from_treetops: chm must be (H, W)")
+    if not chm.flags.c_contiguous:
+        raise ValueError("dalponte2016_from_treetops: chm must be C-contiguous")
+    if chm.shape != layout.shape:
+        raise ValueError(
+            f"dalponte2016_from_treetops: chm.shape {chm.shape} must match "
+            f"layout.shape {layout.shape}"
+        )
+
+    h, w = chm.shape
+    seeds = np.zeros((h, w), dtype=np.int32)
+
+    if treetops.n > 0:
+        rows, cols = layout.cell_xy_to_rowcol(treetops.x, treetops.y)
+        in_bounds = (rows >= 0) & (rows < h) & (cols >= 0) & (cols < w)
+        if in_bounds.any():
+            r = rows[in_bounds].astype(np.int64)
+            c = cols[in_bounds].astype(np.int64)
+            # Sequential 1..K_in, in original treetops order. lidR uses
+            # `1:nrow(treetops)` for the SEQUENTIALIDTREE column and stars
+            # rasterization is last-wins for cell collisions; numpy advanced
+            # assignment matches: later writes overwrite earlier ones.
+            seq = (np.flatnonzero(in_bounds) + 1).astype(np.int32)
+            seeds[r, c] = seq
+
+    # _core.dalponte2016 expects a finite CHM; substitute -inf for NaN so
+    # the comparator never silently evaluates `nan > th_tree` as False
+    # (which is the right behavior, but we don't want to leave it implicit).
+    chm_clean = np.where(np.isnan(chm), -np.inf, chm)
+    chm_clean = np.ascontiguousarray(chm_clean, dtype=np.float64)
+
+    crowns = _core.dalponte2016(
+        chm=chm_clean,
+        seeds=seeds,
+        th_tree=th_tree,
+        th_seed=th_seed,
+        th_cr=th_cr,
+        max_cr=max_cr,
+    )
+
+    # Remap sequential IDs (1..K) → treetops.tree_id values. lidR:
+    # `Crowns[] <- treetops[[ID]][Crowns]` — cells with crowns==0 stay 0.
+    out_dtype = treetops.tree_id.dtype
+    out = np.zeros((h, w), dtype=out_dtype)
+    nonzero = crowns > 0
+    if nonzero.any():
+        # Only ids assigned in `seeds` will appear in `crowns`; map each via
+        # the original treetops.tree_id array (1-indexed → 0-indexed lookup).
+        idx = crowns[nonzero] - 1
+        # idx may legally exceed treetops.n - 1 if the kernel produces an
+        # ID we never seeded; defensive cap (should not happen).
+        if idx.max() >= treetops.n:
+            raise RuntimeError(
+                f"_core.dalponte2016 produced id {int(idx.max()) + 1} > "
+                f"treetops.n {treetops.n}"
+            )
+        out[nonzero] = treetops.tree_id[idx]
+    return out
+
+
+def silva2016_chm(
+    *,
+    chm: NDArray[np.float64],
+    layout,  # pylidar.raster.RasterLayout
+    treetops,  # pylidar.locate_trees.Treetops
+    max_cr_factor: float = 0.6,
+    exclusion: float = 0.3,
+) -> NDArray:
+    """Silva 2016 Voronoi+hmax segmentation on a CHM.
+
+    1:1 port of lidR ``algorithm-its.R::silva2016`` (L257-277). For every
+    non-NaN CHM cell:
+
+    1. Find the nearest treetop in xy (``cKDTree.query(k=1)``); the
+       resulting per-cell tree assignment is the Voronoi partition.
+    2. Compute ``hmax`` per tree as the maximum CHM cell value among cells
+       assigned to that tree (NB: this is **CHM-cell hmax**, not point-cloud
+       hmax — the existing :func:`silva2016` adaptation uses point-cloud z).
+    3. Keep cells satisfying ``z >= exclusion * hmax`` and
+       ``d <= max_cr_factor * hmax``. All other cells become 0
+       (unassigned).
+    4. Map the per-cell tree index back to ``treetops.tree_id``.
+
+    Parameters
+    ----------
+    chm : (H, W) float64 ndarray
+    layout : RasterLayout
+    treetops : Treetops
+    max_cr_factor : float, default 0.6
+    exclusion : float in (0, 1), default 0.3
+
+    Returns
+    -------
+    (H, W) ndarray
+        Tree-id raster, dtype matches ``treetops.tree_id.dtype``.
+    """
+    from .locate_trees import Treetops as _Treetops
+
+    if not isinstance(treetops, _Treetops):
+        raise TypeError("treetops must be a pylidar.locate_trees.Treetops")
+    if not isinstance(chm, np.ndarray):
+        raise TypeError("silva2016_chm: chm must be a numpy ndarray")
+    if chm.dtype != np.float64:
+        raise TypeError("silva2016_chm: chm must be float64")
+    if chm.ndim != 2:
+        raise ValueError("silva2016_chm: chm must be (H, W)")
+    if not chm.flags.c_contiguous:
+        raise ValueError("silva2016_chm: chm must be C-contiguous")
+    if chm.shape != layout.shape:
+        raise ValueError(
+            f"silva2016_chm: chm.shape {chm.shape} must match layout.shape "
+            f"{layout.shape}"
+        )
+    if not (max_cr_factor > 0.0):
+        raise ValueError("silva2016_chm: max_cr_factor must be > 0")
+    if not (0.0 < exclusion < 1.0):
+        raise ValueError("silva2016_chm: exclusion must be in (0, 1)")
+
+    out_dtype = treetops.tree_id.dtype
+    h, w = chm.shape
+    out = np.zeros((h, w), dtype=out_dtype)
+
+    if treetops.n == 0:
+        return out
+
+    finite_mask = ~np.isnan(chm)
+    if not finite_mask.any():
+        return out
+
+    rows_idx, cols_idx = np.nonzero(finite_mask)
+    cell_x, cell_y = layout.rowcol_to_cell_xy(rows_idx, cols_idx)
+    cell_z = chm[rows_idx, cols_idx]
+
+    treetops_xy = np.column_stack((treetops.x, treetops.y))
+    tree = cKDTree(treetops_xy)
+    dists, nn_idx = tree.query(np.column_stack((cell_x, cell_y)), k=1)
+    nn_idx = np.asarray(nn_idx, dtype=np.int64)
+    dists = np.asarray(dists, dtype=np.float64)
+
+    # hmax[t] = max(cell_z) over cells assigned to tree t.
+    hmax = np.full((treetops.n,), -np.inf, dtype=np.float64)
+    np.maximum.at(hmax, nn_idx, cell_z)
+
+    keep = (cell_z >= exclusion * hmax[nn_idx]) & (
+        dists <= max_cr_factor * hmax[nn_idx]
+    )
+    if keep.any():
+        out[rows_idx[keep], cols_idx[keep]] = treetops.tree_id[nn_idx[keep]]
     return out
