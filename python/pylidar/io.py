@@ -1,9 +1,13 @@
-"""LAS / LAZ IO with lidR-shaped `select` DSL and `point_mask` filtering.
+"""LAS / LAZ IO with lidR-shaped `select` DSL, `point_mask` filtering, and
+``write_las_with_treeid``.
 
 PORT NOTE
 ---------
-Adapted from lidR ``R/io_readLAS.R`` (L5-260) and ``R/filters.R`` (L49-200).
-Translation choices, with the lidR semantics they're matched against:
+Adapted from lidR ``R/io_readLAS.R`` (L5-260), ``R/filters.R`` (L49-200),
+and ``R/segment_trees.R::segment_trees.LAS`` L37-108 (the
+``add_lasattribute_manual`` finishing step that persists ``treeID`` as a
+LAS extra-byte dimension). Translation choices, with the lidR semantics
+they're matched against:
 
 * ``select`` accepts the lidR letter DSL (``"xyziar"``, ``"*"``, ``"* -i -a"``,
   ``"xyz0"``) and a Python list (``["X", "Y", "Z"]``). The character → laspy
@@ -42,12 +46,40 @@ Translation choices, with the lidR semantics they're matched against:
   ``keep_*`` / ``drop_*`` parameters — we do **not** introduce a
   ``pylidar.filters`` module or replicate the R NSE machinery
   (``filter_poi``); ``point_mask(las, **kwargs)`` is the unified entry.
+* :func:`write_las_with_treeid` clones ``las_in`` via a BytesIO round-trip
+  (laspy's records can't be ``copy.deepcopy``'d — its ``__getattr__``
+  recurses), then ADDs a ``treeID`` extra-byte dimension and writes.
+  The extra-byte ``type`` is driven by ``tree_id.dtype`` AND
+  ``uniqueness``:
+
+  * ``tree_id.dtype == int32`` + ``uniqueness="incremental"`` → persist
+    as LAS spec type 6 (int32), NA sentinel ``np.iinfo(np.int32).max``.
+  * ``tree_id.dtype == int32`` + ``uniqueness ∈ {"gpstime", "bitmerge"}``
+    → recompute per-tree apex IDs from ``las_in`` (max-z point per tree,
+    1:1 with lidR ``segment_trees.R:51-63`` ``tapex``/``xyapex``
+    closures), persist as LAS spec type 10 (float64), NA sentinel
+    ``np.finfo(np.float64).tiny`` (R's ``.Machine$double.xmin``).
+  * ``tree_id.dtype == float64`` → "already finalized" path; persist
+    as-is regardless of uniqueness param (Phase 4's
+    :class:`Treetops.tree_id` propagation paths use this).
+
+  Apex tie-breakers match lidR ``segment_trees.R:51-63``: gpstime ties
+  → lowest gpstime; bitmerge ties → lowest x. Points whose
+  ``tree_id == 0`` (pylidar's no-tree sentinel) or whose tree_id equals
+  the input-dtype NA sentinel are skipped from grouping and written
+  with the output-dtype NA sentinel — out-of-grid points and in-grid
+  no-tree points collapse to the LAS-spec NA on disk.
+  RGB is preserved when present in the input point format; if the user
+  passes ``rgb=`` AND the input point format lacks RGB, we raise —
+  upgrading the point format would force re-encoding every point
+  record and is out of scope.
 """
 
 from __future__ import annotations
 
+import io as _io
 from pathlib import Path
-from typing import Iterable, Sequence, Union
+from typing import Iterable, Optional, Sequence, Union
 
 import laspy
 import numpy as np
@@ -56,9 +88,13 @@ from numpy.typing import NDArray
 __all__ = [
     "read_las",
     "point_mask",
-    "parse_select",
+    "write_las_with_treeid",
     "FilterKwargError",
 ]
+# ``parse_select`` is exposed at module level for backward compatibility
+# with tests but is **not** in ``__all__`` — it's a parser helper, not
+# part of the stable public surface. Phase 5 audit fix #4: prior versions
+# returned a 3-tuple; the current 4-tuple shape is internal.
 
 
 # Char → canonical laspy field name. Sourced from lidR ``io_readLAS.R:16-26``.
@@ -456,3 +492,257 @@ def _as_int_seq(value: Union[int, Iterable[int]], name: str) -> np.ndarray:
     except (TypeError, ValueError) as exc:
         raise TypeError(f"{name}: must be int or sequence of int, got {value!r}") from exc
     return arr
+
+
+# ---------------------------------------------------------------- write_las_with_treeid
+
+_RGB_POINT_FORMATS = frozenset({2, 3, 5, 7, 8, 10})
+_UNIQUENESS_MODES = frozenset({"incremental", "gpstime", "bitmerge"})
+
+
+def write_las_with_treeid(
+    las_in: laspy.LasData,
+    tree_id: NDArray,
+    out_path: Union[str, Path],
+    *,
+    rgb: Optional[NDArray] = None,
+    uniqueness: str = "incremental",
+) -> None:
+    """Write ``las_in`` to ``out_path`` with a persistent ``treeID`` extra-dim.
+
+    Preserves ``las_in``'s header (version, point_format, scales, offsets),
+    every VLR (including the GeoKey / CRS VLRs), and every existing point
+    dimension. Adds a single ``treeID`` extra-byte dimension whose
+    LAS-spec type is driven by ``tree_id.dtype``:
+
+    ============  =================  =================================
+    tree_id.dtype LAS extra type     NA sentinel (no_data)
+    ============  =================  =================================
+    int32         ``"int"`` (6)      ``np.iinfo(np.int32).max``
+    float64       ``"double"`` (10)  ``np.finfo(np.float64).tiny``
+    ============  =================  =================================
+
+    Mirrors lidR ``segment_trees.R:43-46/78/106``: int path uses
+    ``.Machine$integer.max``; double path uses ``.Machine$double.xmin``.
+
+    Parameters
+    ----------
+    las_in : laspy.LasData
+        Source point cloud. All dimensions and VLRs are carried over.
+    tree_id : (N,) int32 | float64
+        Per-point label, length must equal ``len(las_in.x)``. Points
+        outside any tree should be labelled with the NA sentinel
+        (``np.iinfo(np.int32).max`` for int / ``np.finfo(np.float64).tiny``
+        for double) or with ``0`` for the conventional "unsegmented"
+        int sentinel.
+    out_path : str | Path
+        Destination LAS / LAZ file.
+    rgb : (N, 3) uint16 | None
+        Optional RGB triplet. The input point format must already support
+        RGB (formats 2, 3, 5, 7, 8, 10); we don't upgrade the point format
+        in v0. When ``rgb`` is ``None`` the input's existing RGB (if any)
+        is preserved as-is.
+    uniqueness : {'incremental', 'gpstime', 'bitmerge'}, default 'incremental'
+        Records the lidR uniqueness mode in the extra-byte description
+        string. Does not itself change the on-disk dtype; pick
+        ``tree_id.dtype`` to drive that.
+    """
+    if uniqueness not in _UNIQUENESS_MODES:
+        raise ValueError(
+            f"uniqueness must be one of {sorted(_UNIQUENESS_MODES)}, got {uniqueness!r}"
+        )
+
+    if not isinstance(tree_id, np.ndarray):
+        raise TypeError("tree_id must be a numpy ndarray")
+    if tree_id.ndim != 1:
+        raise ValueError("tree_id must be 1-D")
+    n = len(las_in.x)
+    if tree_id.shape[0] != n:
+        raise ValueError(
+            f"tree_id length {tree_id.shape[0]} != input point count {n}"
+        )
+
+    # Pass the numpy dtype directly so laspy writes LAS spec table 24 types
+    # 6 (int = int32, 4 bytes) or 10 (double = float64, 8 bytes). Passing the
+    # string ``"int"`` would route through laspy's 8-byte int path, which
+    # is a wider type than lidR's ``add_lasattribute_manual(..., type="int")``
+    # writes (rlas type 6 = 4-byte signed int).
+    if tree_id.dtype == np.int32:
+        if uniqueness == "incremental":
+            eb_type = np.int32
+            eb_no_data = int(np.iinfo(np.int32).max)
+            tree_id_out = tree_id
+        else:
+            # Apex-based recomputation; output is float64 per
+            # lidR segment_trees.R:78,106 (NA_value = .Machine$double.xmin).
+            eb_type = np.float64
+            eb_no_data = float(np.finfo(np.float64).tiny)
+            tree_id_out = _apply_uniqueness(
+                tree_id, las_in, uniqueness=uniqueness
+            )
+    elif tree_id.dtype == np.float64:
+        # "Already finalized" path — Phase 4 propagation already encoded the
+        # mode via Treetops.tree_id; persist as-is, no apex recomputation.
+        eb_type = np.float64
+        eb_no_data = float(np.finfo(np.float64).tiny)
+        tree_id_out = tree_id
+    else:
+        raise TypeError(
+            f"tree_id dtype must be int32 or float64, got {tree_id.dtype}"
+        )
+
+    pf_id = int(las_in.point_format.id)
+    if rgb is not None:
+        if pf_id not in _RGB_POINT_FORMATS:
+            raise ValueError(
+                f"rgb supplied but input point_format {pf_id} has no RGB channels; "
+                f"supported formats: {sorted(_RGB_POINT_FORMATS)}"
+            )
+        rgb_arr = np.asarray(rgb)
+        if rgb_arr.ndim != 2 or rgb_arr.shape != (n, 3):
+            raise ValueError(
+                f"rgb must have shape ({n}, 3), got {rgb_arr.shape}"
+            )
+        if rgb_arr.dtype != np.uint16:
+            rgb_arr = rgb_arr.astype(np.uint16)
+
+    # laspy 2.x can't copy.deepcopy a LasData (its __getattr__ recurses on
+    # missing attributes); the BytesIO round-trip is the supported clone
+    # path and preserves every VLR, header field, and point dimension.
+    buf = _io.BytesIO()
+    las_in.write(buf)
+    buf.seek(0)
+    las_out = laspy.read(buf)
+
+    if "treeID" in las_out.point_format.dimension_names:
+        raise ValueError(
+            "input LAS already has a 'treeID' extra dimension; remove it before writing."
+        )
+
+    las_out.add_extra_dim(
+        laspy.ExtraBytesParams(
+            name="treeID",
+            type=eb_type,
+            description=f"tree id ({uniqueness})",
+            no_data=[eb_no_data],
+        )
+    )
+    las_out.treeID = tree_id_out.copy()
+
+    if rgb is not None:
+        las_out.red = rgb_arr[:, 0]
+        las_out.green = rgb_arr[:, 1]
+        las_out.blue = rgb_arr[:, 2]
+
+    las_out.write(str(out_path))
+
+
+# ---------------------------------------------------------------- uniqueness helpers
+#
+# 1:1 port of lidR ``R/segment_trees.R:51-108`` ``tapex`` / ``xyapex`` /
+# bitmerge branch. Inputs are per-point int32 tree IDs (raw segmentation
+# output), output is a per-point float64 array of apex-derived IDs.
+
+_INT32_NA = np.iinfo(np.int32).max
+
+
+def _apply_uniqueness(
+    tree_id: NDArray[np.int32],
+    las_in: laspy.LasData,
+    *,
+    uniqueness: str,
+) -> NDArray[np.float64]:
+    """Compute per-tree apex IDs (gpstime or bitmerge) and broadcast.
+
+    Mirrors lidR ``segment_trees.R:68-108``: groups int32 ``tree_id``
+    by value (skipping the no-tree sentinels 0 and ``INT32_NA``),
+    finds the per-tree apex via ``max(z)`` with a deterministic
+    tie-breaker (``gpstime``: lowest gps time; ``bitmerge``: lowest x),
+    derives the per-tree ID from that apex, and returns a length-N
+    float64 array.
+
+    Points whose ``tree_id`` is a no-tree sentinel keep the LAS NA
+    sentinel ``np.finfo(np.float64).tiny``.
+    """
+    z = np.asarray(las_in.z, dtype=np.float64)
+    out = np.full(tree_id.shape[0], np.finfo(np.float64).tiny, dtype=np.float64)
+
+    valid_mask = (tree_id != 0) & (tree_id != _INT32_NA)
+    valid_idx = np.flatnonzero(valid_mask)
+    if valid_idx.size == 0:
+        return out
+
+    ids_valid = tree_id[valid_idx]
+    z_valid = z[valid_idx]
+
+    if uniqueness == "gpstime":
+        if not hasattr(las_in, "gps_time"):
+            raise ValueError(
+                "uniqueness='gpstime' requires the input LAS to carry gps_time "
+                "(lidR segment_trees.R:17-18)."
+            )
+        gpstime = np.asarray(las_in.gps_time, dtype=np.float64)
+        if not np.any(gpstime != 0.0):
+            raise ValueError(
+                "Impossible to compute unique IDs using gpstime: "
+                "gpstime is not populated (lidR segment_trees.R:20-21)."
+            )
+        t_valid = gpstime[valid_idx]
+        # lexsort: primary ids ASC, secondary z DESC, tertiary gpstime ASC.
+        # First element per group → max-z with min-gpstime tie-breaker.
+        order = np.lexsort((t_valid, -z_valid, ids_valid))
+        ids_sorted = ids_valid[order]
+        t_sorted = t_valid[order]
+        unique_ids, first_idx = np.unique(ids_sorted, return_index=True)
+        apex_t = t_sorted[first_idx]
+        # Map each valid point's id to its apex_t.
+        id_to_apex = dict(zip(unique_ids.tolist(), apex_t.tolist()))
+        out[valid_idx] = np.fromiter(
+            (id_to_apex[int(tid)] for tid in ids_valid),
+            dtype=np.float64,
+            count=ids_valid.size,
+        )
+        return out
+
+    if uniqueness == "bitmerge":
+        # lidR segment_trees.R:86-88: scale = header X/Y scale factor;
+        # offset = header X/Y offset.
+        scales = las_in.header.scales
+        offsets = las_in.header.offsets
+        xscale = float(scales[0])
+        yscale = float(scales[1])
+        if xscale <= 0.0 or yscale <= 0.0:
+            raise ValueError(
+                f"uniqueness='bitmerge' requires positive X/Y scales, "
+                f"got X={xscale}, Y={yscale}"
+            )
+        xoffset = float(offsets[0])
+        yoffset = float(offsets[1])
+        x_full = np.asarray(las_in.x, dtype=np.float64)
+        y_full = np.asarray(las_in.y, dtype=np.float64)
+        x_valid = x_full[valid_idx]
+        y_valid = y_full[valid_idx]
+        # lexsort: primary ids ASC, secondary z DESC, tertiary x ASC.
+        # First element per group → max-z apex with min-x tie-breaker.
+        order = np.lexsort((x_valid, -z_valid, ids_valid))
+        ids_sorted = ids_valid[order]
+        x_sorted = x_valid[order]
+        y_sorted = y_valid[order]
+        unique_ids, first_idx = np.unique(ids_sorted, return_index=True)
+        apex_x = x_sorted[first_idx]
+        apex_y = y_sorted[first_idx]
+        # Scale to int32 per lidR L94-95.
+        xscaled = ((apex_x - xoffset) / xscale).astype(np.int32)
+        yscaled = ((apex_y - yoffset) / yscale).astype(np.int32)
+        from .locate_trees import bitmerge as _bitmerge
+        apex_ids = _bitmerge(xscaled, yscaled)
+        id_to_apex = dict(zip(unique_ids.tolist(), apex_ids.tolist()))
+        out[valid_idx] = np.fromiter(
+            (id_to_apex[int(tid)] for tid in ids_valid),
+            dtype=np.float64,
+            count=ids_valid.size,
+        )
+        return out
+
+    # Defensive: caller already validated uniqueness ∈ _UNIQUENESS_MODES.
+    raise ValueError(f"unsupported uniqueness mode: {uniqueness!r}")
