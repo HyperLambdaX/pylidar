@@ -43,6 +43,13 @@ def lmf_chm(
     shape: str = "circular",
 ) -> NDArray[np.int32]: ...
 
+def watershed_ext(
+    *,
+    chm: NDArray[np.float64],
+    tolerance: float = 1.0,
+    ext: int = 1,
+) -> NDArray[np.int32]: ...
+
 def chm_smooth(
     *,
     xyz: NDArray[np.float64],

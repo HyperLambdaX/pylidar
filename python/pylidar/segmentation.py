@@ -11,10 +11,7 @@ from typing import Callable, Union
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import ndimage as ndi
 from scipy.spatial import cKDTree
-from skimage.morphology import h_maxima, local_maxima
-from skimage.segmentation import watershed as _ski_watershed
 
 from . import _core
 
@@ -423,26 +420,25 @@ def watershed(
     chm: NDArray[np.float64],
     th_tree: float = 2.0,
     tol: float = 1.0,
+    ext: int = 1,
 ) -> NDArray[np.int32]:
-    """Watershed-based crown segmentation on a CHM.
+    """Watershed-based crown segmentation on a CHM (EBImage parity).
 
-    Adapted from ``lidR/R/algorithm-its.R::watershed`` (line 328). lidR
-    delegates to ``EBImage::watershed``; we substitute scikit-image's
-    morphology + watershed pipeline with the closest semantic mapping:
+    1:1 port of lidR ``R/algorithm-its.R::watershed`` (L328-377), which
+    delegates to ``EBImage::watershed``. Phase 4.5 (2026-05-13) replaced
+    the previous skimage approximation with a direct C++ port of
+    ``EBImage src/watershed.cpp`` (see :func:`pylidar._core.watershed_ext`
+    + ``src/core/its/watershed_ext.cpp`` PORT NOTE).
 
-    - ``tol`` ↔ ``EBImage::watershed`` tolerance: minimum prominence of a
-      regional maximum to count as a separate basin. Implemented via
-      ``skimage.morphology.h_maxima(canopy, h=tol)`` which selects
-      regional maxima whose intensity exceeds the surrounding plateau by
-      at least ``tol``.
-    - Flooding: ``skimage.segmentation.watershed(-canopy, markers,
-      mask=canopy > 0)`` floods basins of the negated CHM (i.e. peaks of
-      the original CHM) restricted to the above-threshold mask.
+    Pipeline (mirrors lidR R wrapper):
 
-    EBImage's ``ext`` parameter (default 1) is not exposed — scikit-image
-    uses a fixed structuring element for ``h_maxima`` and the default
-    full N-D connectivity for ``watershed``. Spec §3 signature omits
-    ``ext`` accordingly.
+    1. ``Canopy[Canopy < th_tree | is.na(Canopy)] <- 0`` (mask + cleanup).
+    2. ``Crowns <- _core.watershed_ext(Canopy, tolerance=tol, ext=ext)``
+       — height-descending priority-queue flood with EBImage's
+       multi-neighbour merge / tolerance semantics.
+    3. ``Crowns[mask] <- 0`` (explicit zero-fill on background; lidR
+       writes ``NA_integer_`` here, we render NA as 0 to match the
+       Python contract used by :func:`pylidar.merge.merge_raster_labels`).
 
     Parameters
     ----------
@@ -450,25 +446,35 @@ def watershed(
         Canopy height model in meters. NaN cells are treated as below
         ``th_tree`` (no tree).
     th_tree : float, default 2.0
-        Cells with ``chm < th_tree`` (or NaN) are masked out (returned as
-        0 in the output) and excluded from the watershed.
+        Cells with ``chm < th_tree`` (or NaN) become 0 in the output and
+        are excluded from the flood.
     tol : float, default 1.0
-        Minimum height contrast for a regional maximum to seed a
-        distinct basin.
+        Minimum height drop from a regional maximum to seed a distinct
+        basin; mapped 1:1 to EBImage's ``tolerance``.
+    ext : int, default 1
+        Neighbourhood half-side in pixels. ``ext=1`` → 3×3 (8-connected);
+        ``ext=2`` → 5×5; etc. Mapped 1:1 to EBImage's ``ext``.
 
     Returns
     -------
     (H, W) int32 ndarray
         Tree id per pixel: 0 = below ``th_tree`` / NaN / unassigned,
-        positive integers = tree ids (1-based, contiguous from 1).
+        positive integers = tree ids contiguous from 1.
 
     Notes
     -----
-    The output is **not** byte-for-byte identical to ``EBImage::watershed``
-    because the underlying watershed implementations differ. The fixtures
-    in ``tests/fixtures/watershed_*.npz`` are manually derived against the
-    skimage semantics described above; ``meta/source`` records the
-    derivation.
+    Determinism on plateaus: EBImage relies on R's ``rsort_with_index``
+    which is not stable, so EBImage outputs are non-deterministic on
+    flat regions. This port uses ``std::stable_sort`` with a row-major
+    tie-breaker, so our output is deterministic and reproducible — but
+    on plateaus may differ from EBImage's specific (non-deterministic)
+    choice. On non-plateau inputs the two should agree bit-exactly
+    (R-side byte-level fixture comparison was deferred in Phase 4.5;
+    no R env in build host).
+
+    The previous skimage-based approximation (``h_maxima`` + flood on
+    negated CHM) is no longer used at runtime. It remains useful as a
+    sanity-check baseline if the C++ kernel ever gets refactored.
     """
     if not isinstance(chm, np.ndarray):
         raise TypeError("watershed: chm must be a numpy ndarray")
@@ -480,42 +486,18 @@ def watershed(
         raise ValueError("watershed: chm must be C-contiguous")
     if not (tol >= 0.0):
         raise ValueError("watershed: tol must be >= 0")
+    if not isinstance(ext, (int, np.integer)) or ext < 1:
+        raise ValueError("watershed: ext must be an integer >= 1")
 
     h, w = chm.shape
-    # Treat NaN as below threshold; below-threshold cells form the
-    # excluded mask. Use 0 as the flooding floor for masked cells (matches
-    # lidR's `Canopy[mask] <- 0` at algorithm-its.R:361).
+
+    # Mirror lidR's R wrapper exactly: NaN → 0; below-threshold → 0.
+    # The C++ kernel skips cells with src <= 0, so masked cells receive
+    # label 0 automatically; we don't re-zero after the call.
     canopy = np.where(np.isnan(chm) | (chm < th_tree), 0.0, chm)
-    mask = canopy > 0
+    canopy = np.ascontiguousarray(canopy, dtype=np.float64)
 
-    if not mask.any():
-        return np.zeros((h, w), dtype=np.int32)
-
-    # tol == 0 means "keep every regional maximum" (lidR / EBImage allow
-    # this). skimage's h_maxima rejects h=0 as ambiguous and points to
-    # local_maxima, which IS the right primitive for that case — it
-    # returns connected components of regional maxima. We special-case
-    # tol=0 explicitly so the user-facing tol >= 0 contract holds without
-    # leaking the skimage error.
-    # On a flat plateau h_maxima returns the whole plateau as one peak;
-    # that's harmless because we then label-and-watershed it.
-    if tol == 0.0:
-        peaks = local_maxima(canopy, allow_borders=True)
-    else:
-        peaks = h_maxima(canopy, h=tol)
-    markers, _ = ndi.label(peaks)
-    if markers.max() == 0:
-        return np.zeros((h, w), dtype=np.int32)
-
-    labels = _ski_watershed(-canopy, markers=markers, mask=mask)
-    out = labels.astype(np.int32, copy=False)
-    # Explicitly zero masked cells. skimage documents that pixels labelled
-    # 0 in `mask` are excluded from flooding, but we don't want our output
-    # contract to depend on a third-party library's fill convention for
-    # excluded cells — pin it locally so future skimage versions can't
-    # silently shift the meaning of 0 in the output.
-    out = np.where(mask, out, np.int32(0))
-    return out
+    return _core.watershed_ext(chm=canopy, tolerance=float(tol), ext=int(ext))
 
 
 # ─────────────────────────────────────────────── Phase 4 high-level wrappers

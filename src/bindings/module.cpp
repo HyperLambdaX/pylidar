@@ -14,6 +14,7 @@
 #include "lmf.hpp"
 #include "matrix2d.hpp"
 #include "point.hpp"
+#include "watershed_ext.hpp"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -214,6 +215,35 @@ Int32MatOut lmf_chm_binding(Float64Mat chm,
     return Int32MatOut(out, 2, shape_arr, owner);
 }
 
+// ─────────────────── watershed_ext ───────────────────
+Int32MatOut watershed_ext_binding(Float64Mat chm,
+                                  double tolerance,
+                                  int ext) {
+    if (!(tolerance >= 0.0)) {
+        throw std::invalid_argument(
+            "watershed_ext: tolerance must be >= 0");
+    }
+    if (ext < 1) {
+        throw std::invalid_argument("watershed_ext: ext must be >= 1");
+    }
+    const std::size_t H = chm.shape(0);
+    const std::size_t W = chm.shape(1);
+
+    int32_t* out = new int32_t[H * W];
+
+    pylidar::core::Matrix2D<double> chm_view(
+        const_cast<double*>(chm.data()), H, W);
+    pylidar::core::Matrix2D<int32_t> out_view(out, H, W);
+
+    pylidar::core::its::watershed_ext(chm_view, tolerance, ext, out_view);
+
+    nb::capsule owner(out, [](void* p) noexcept {
+        delete[] static_cast<int32_t*>(p);
+    });
+    std::size_t shape[2] = {H, W};
+    return Int32MatOut(out, 2, shape, owner);
+}
+
 // ─────────────────── chm_smooth ───────────────────
 Float64VecOut chm_smooth_binding(Float64Mat xyz,
                                  double size,
@@ -311,6 +341,20 @@ NB_MODULE(_core, m) {
           "chm:    (H, W) float64, C-contiguous.\n"
           "ws:     window size in **pixel** units (not world).\n"
           "Returns: (K, 2) int32 — (row, col) indices of detected maxima.");
+
+    m.def("watershed_ext", &watershed_ext_binding,
+          nb::kw_only(),
+          "chm"_a.noconvert(),
+          "tolerance"_a = 1.0,
+          "ext"_a       = 1,
+          "Watershed transform with EBImage semantics (`tolerance` + `ext`).\n"
+          "1:1 port of EBImage::watershed (Bioconductor src/watershed.cpp).\n"
+          "chm:        (H, W) float64, C-contiguous. Background cells must\n"
+          "            already be zeroed by the caller (lidR R wrapper does\n"
+          "            this); NaN inputs unsupported.\n"
+          "tolerance:  minimum height drop to seed a separate basin.\n"
+          "ext:        neighbourhood half-side in pixels (>= 1).\n"
+          "Returns:    (H, W) int32 — 1..K compact labels, 0 = background.");
 
     m.def("chm_smooth", &chm_smooth_binding,
           nb::kw_only(),

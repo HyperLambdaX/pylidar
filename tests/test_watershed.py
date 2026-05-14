@@ -1,13 +1,18 @@
-"""watershed — skimage-based crown segmentation on a CHM.
+"""watershed — EBImage-port crown segmentation on a CHM.
 
 Each parametrized case loads ``tests/fixtures/watershed_*.npz`` and
 verifies the (H, W) int32 label output against hand-derived expected
 labels (``np.array_equal`` per spec §10.4 — integer outputs require
 strict equality).
 
-Fixture topologies are deliberately disjoint or unambiguous so that
-neither skimage's heap tie-breaking nor h_maxima's exact prominence
-boundary affect the outcome.
+History: these fixtures were originally authored in M3 against a
+skimage approximation (see ``docs/port-notes.md`` §5 historical note).
+Phase 4.5 (2026-05-13) replaced the runtime backend with a 1:1 C++
+port of EBImage's ``src/watershed.cpp`` (``_core.watershed_ext``);
+the fixture topologies are unambiguous enough that they continue to
+pass under the new backend without any expected-value changes. New
+EBImage-port-specific kernel tests live in
+``tests/test_watershed_ext.py`` (Phase 4.5).
 """
 
 from __future__ import annotations

@@ -1008,6 +1008,19 @@ def fx_chm_smooth_corner_square_shape() -> dict:
 
 
 # --- watershed fixtures ------------------------------------------------------
+#
+# IMPORTANT (Phase 4.5, 2026-05-13): the four `fx_watershed_*` functions below
+# were authored in M3 against the original skimage approximation
+# (`docs/port-notes.md` §5 historical note). Phase 4.5 replaced the runtime
+# backend with a 1:1 port of EBImage::watershed (`_core.watershed_ext`);
+# their `meta/source` strings still cite the original skimage derivation
+# because that is when the *expected* labels were hand-derived. The
+# topologies are deliberately disjoint / unambiguous so the EBImage port
+# produces the same labels under `np.array_equal`, which is why the existing
+# .npz files were carried forward unchanged. Do NOT add new EBImage-port
+# fixtures here — author them inline in `tests/test_watershed_ext.py` per
+# the §8h convention, or regenerate these and update `meta/source` to point
+# at EBImage `src/watershed.cpp` if you have an R env to validate against.
 
 def fx_watershed_happy() -> dict:
     """Two peaks in disjoint mask regions ⇒ each gets its own basin.

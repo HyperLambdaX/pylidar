@@ -13,11 +13,14 @@ dependencies = [
     "numpy>=2.1",
     "laspy>=2.5",
     "scipy>=1.13",
-    "scikit-image>=0.24",
     # Phase 3 (raster module) — full CRS objects on RasterLayout, kriging na_fill.
     "pyproj>=3.6",
     "pykrige>=1.7",
 ]
+# Note: scikit-image was a runtime dep through M3 (used by the original
+# skimage-based watershed approximation). Phase 4.5 (2026-05-13) replaced
+# that runtime path with a 1:1 C++ port of EBImage's watershed
+# (`_core.watershed_ext`); the dep is no longer imported anywhere.
 
 [project.optional-dependencies]
 dev = [
