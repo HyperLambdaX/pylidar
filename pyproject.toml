@@ -23,6 +23,13 @@ dependencies = [
 # (`_core.watershed_ext`); the dep is no longer imported anywhere.
 
 [project.optional-dependencies]
+# Phase 6: LAScatalog parallel execution. Single-process catalog use
+# (n_workers=1) works without this extra; parallel dispatch requires
+# joblib (Q7 decision, 2026-05-11). Install via
+# `pip install pylidar[catalog]`.
+catalog = [
+    "joblib>=1.4",
+]
 dev = [
     "pytest>=8",
     "pytest-benchmark>=4",
