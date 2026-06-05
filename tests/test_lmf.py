@@ -85,6 +85,33 @@ def test_lmf_points_array_ws(load_fixture):
     np.testing.assert_array_equal(lm, fx["expected/lm"])
 
 
+@pytest.mark.parametrize(
+    "bad_value,as_callable",
+    [
+        (-1.0, False),
+        (np.nan, False),
+        (-1.0, True),
+        (np.nan, True),
+    ],
+)
+def test_lmf_points_rejects_non_positive_or_nan_ws(
+    load_fixture, bad_value, as_callable
+):
+    fx = load_fixture("lmf_points_happy")
+    if as_callable:
+        ws = lambda z: bad_value
+    else:
+        ws = np.full((fx["inputs/xyz"].shape[0],), 2.5, dtype=np.float64)
+        ws[0] = bad_value
+    with pytest.raises(ValueError, match="strictly positive"):
+        lmf_points(
+            xyz=fx["inputs/xyz"],
+            ws=ws,
+            hmin=float(fx["inputs/hmin"]),
+            shape=str(fx["inputs/shape"]),
+        )
+
+
 def test_lmf_points_rejects_wrong_dtype(load_fixture):
     fx = load_fixture("lmf_points_happy")
     xyz_f32 = fx["inputs/xyz"].astype(np.float32)

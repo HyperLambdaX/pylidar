@@ -25,6 +25,8 @@ wheels/
 .claude/
 skills-lock.json
 
+output/
+
 # Per-agent guide files (kept locally for each tool's own consumption,
 # not shared via git — different machines / collaborators may want
 # different versions)

@@ -14,10 +14,10 @@ choices:
   ``float64`` numpy array; downstream code dispatches on dtype (user
   decision 2026-05-12).
 * :func:`locate_trees_chm` and :func:`locate_trees_points` are the two
-  entry points. lidR's ``locate_trees(las, lmf(...))`` wraps both into one
-  R-side dispatch via ``raster_as_las``; pylidar already exposes
-  ``_core.lmf_chm`` and ``_core.lmf_points`` independently, so this port
-  keeps two flat functions instead of recreating the dispatch chain.
+  entry points. lidR's ``locate_trees(chm, lmf(...))`` converts the raster
+  to a LAS-like point cloud via ``raster_as_las``; pylidar keeps the fast
+  ``_core.lmf_chm`` path for fixed-window square-pixel CHMs and uses the
+  same raster-as-points idea for CHM variable-window LMF.
 * Three uniqueness modes (``incremental`` / ``gpstime`` / ``bitmerge``) are
   implemented in :func:`_assign_tree_ids`. The ``bitmerge`` kernel is a
   literal port of the Rcpp loop at ``src/RcppFunction.cpp:431-435``: scaled
@@ -67,6 +67,7 @@ __all__ = [
 
 
 Uniqueness = Literal["incremental", "gpstime", "bitmerge"]
+ChmWindowSize = Union[float, NDArray[np.float64], Callable[[float], float]]
 
 
 # ────────────────────────────────────────────────────────── Treetops dataclass
@@ -236,11 +237,72 @@ def _assign_tree_ids(
 
 # ────────────────────────────────────────────────────────── locate_trees_chm
 
+def _is_scalar_ws(ws: object) -> bool:
+    """Return True for Python/numpy scalar window sizes."""
+    return bool(np.isscalar(ws) or (isinstance(ws, np.ndarray) and ws.shape == ()))
+
+
+def _chm_ws_for_points(
+    ws: ChmWindowSize,
+    *,
+    valid: NDArray[np.bool_],
+    n_valid: int,
+) -> Union[float, NDArray[np.float64], Callable[[float], float]]:
+    """Normalize CHM variable-window input for ``lmf_points``."""
+    if callable(ws) or _is_scalar_ws(ws):
+        return ws
+
+    ws_arr = np.asarray(ws)
+    if ws_arr.dtype != np.float64:
+        raise TypeError("locate_trees_chm: ws array must be float64")
+
+    if ws_arr.shape == valid.shape:
+        return np.ascontiguousarray(ws_arr[valid], dtype=np.float64)
+
+    if ws_arr.shape == (n_valid,):
+        return np.ascontiguousarray(ws_arr, dtype=np.float64)
+
+    raise ValueError(
+        "locate_trees_chm: ws array must have shape chm.shape or "
+        f"({n_valid},) for non-NaN CHM cells; got {ws_arr.shape}"
+    )
+
+
+def _lmf_chm_variable_ws(
+    *,
+    chm: NDArray[np.float64],
+    layout: RasterLayout,
+    ws: ChmWindowSize,
+    hmin: float,
+    shape: Literal["circular", "square"],
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    """Run CHM LMF through the lidR-equivalent raster-as-points path."""
+    from .segmentation import lmf_points
+
+    valid = ~np.isnan(chm)
+    rows_valid, cols_valid = np.nonzero(valid)
+    rows_valid = rows_valid.astype(np.int64, copy=False)
+    cols_valid = cols_valid.astype(np.int64, copy=False)
+
+    x, y = layout.rowcol_to_cell_xy(rows_valid, cols_valid)
+    z = chm[rows_valid, cols_valid]
+    xyz = np.ascontiguousarray(np.column_stack((x, y, z)), dtype=np.float64)
+    ws_points = _chm_ws_for_points(ws, valid=valid, n_valid=int(z.shape[0]))
+
+    mask = lmf_points(xyz=xyz, ws=ws_points, hmin=hmin, shape=shape)
+    if mask.shape != (xyz.shape[0],):
+        raise RuntimeError(
+            f"lmf_points returned shape {mask.shape}, expected ({xyz.shape[0]},)"
+        )
+
+    return rows_valid[mask], cols_valid[mask]
+
+
 def locate_trees_chm(
     chm: NDArray[np.float64],
     layout: RasterLayout,
     *,
-    ws: float,
+    ws: ChmWindowSize,
     hmin: float = 2.0,
     shape: Literal["circular", "square"] = "circular",
     uniqueness: Uniqueness = "incremental",
@@ -249,10 +311,10 @@ def locate_trees_chm(
 ) -> Treetops:
     """Detect treetops on a CHM via lidR-style local-maximum filter.
 
-    Wraps :func:`pylidar.segmentation.lmf_chm` (which calls ``_core.lmf_chm``):
-    the kernel returns ``(K, 2)`` row/col indices; this function reverses
-    them through ``layout`` for world X/Y, samples ``chm[row, col]`` for Z,
-    and assigns IDs per ``uniqueness``.
+    A scalar ``ws`` keeps the fixed-window fast path through
+    ``_core.lmf_chm``. A callable, ``(H, W)`` array, or ``(N_non_nan,)``
+    array follows lidR's raster path: non-NaN CHM cells are materialized as
+    pseudo points at cell centres and filtered with ``lmf_points``.
 
     Parameters
     ----------
@@ -261,14 +323,13 @@ def locate_trees_chm(
     layout : RasterLayout
         Spatial extent + CRS for the CHM. Used to invert (row, col) → (x, y)
         AND to convert ``ws`` from world units to pixel units.
-    ws : float
-        Window size in **world coordinate units** (matches lidR
-        ``lmf(ws=...)`` semantics — lidR converts a CHM to a pseudo-LAS
-        first, so its ``ws`` is always in world units). The wrapper divides
-        by ``layout.xres`` to translate to the pixel-unit ``ws`` that
-        ``_core.lmf_chm`` expects. ``layout.xres`` must equal
-        ``layout.yres`` (square pixels); rectangular pixels would require
-        an elliptical kernel that ``_core.lmf_chm`` does not implement.
+    ws : float | callable | ndarray
+        Window size in **world coordinate units**. A scalar applies a fixed
+        window. A callable is called once per non-NaN CHM cell with that
+        cell's height ``z`` and must return a positive scalar, matching the
+        common lidR ``lmf(function(z) ...)`` case. A 2-D float64 array must
+        match ``chm.shape``; a 1-D float64 array must match the number of
+        non-NaN CHM cells in row-major order.
     hmin : float, default 2.0
         Minimum height for a cell to count as a treetop.
     shape : {'circular', 'square'}, default 'circular'
@@ -301,24 +362,32 @@ def locate_trees_chm(
             f"locate_trees_chm: chm.shape {chm.shape} must match "
             f"layout.shape {layout.shape}"
         )
-    if not (ws > 0.0):
-        raise ValueError("locate_trees_chm: ws must be > 0")
-    if layout.xres != layout.yres:
-        raise NotImplementedError(
-            "locate_trees_chm requires square pixels (layout.xres == "
-            f"layout.yres); got xres={layout.xres}, yres={layout.yres}. "
-            "Resample the CHM or open a follow-up if rectangular pixels "
-            "are needed."
-        )
+    if _is_scalar_ws(ws):
+        ws_scalar = float(ws)
+        if not (ws_scalar > 0.0):
+            raise ValueError("locate_trees_chm: ws must be > 0")
+        if layout.xres != layout.yres:
+            raise NotImplementedError(
+                "locate_trees_chm requires square pixels (layout.xres == "
+                f"layout.yres); got xres={layout.xres}, yres={layout.yres}. "
+                "Resample the CHM or use a variable-window ws path if "
+                "rectangular pixels are needed."
+            )
 
-    # lidR's `lmf(ws=N)` is in world units even for raster CHMs (because
-    # internally it goes through raster_as_las). _core.lmf_chm takes ws in
-    # pixel units. Convert here so the user-facing API matches lidR.
-    ws_pixels = float(ws) / float(layout.xres)
-    # _core.lmf_chm returns (K, 2) int32 row/col pairs.
-    rc = _core.lmf_chm(chm=chm, ws=ws_pixels, hmin=hmin, shape=shape)
-    rows = rc[:, 0].astype(np.int64)
-    cols = rc[:, 1].astype(np.int64)
+        # lidR's `lmf(ws=N)` is in world units even for raster CHMs. The
+        # fixed-window _core.lmf_chm kernel takes ws in pixel units.
+        ws_pixels = ws_scalar / float(layout.xres)
+        rc = _core.lmf_chm(chm=chm, ws=ws_pixels, hmin=hmin, shape=shape)
+        rows = rc[:, 0].astype(np.int64)
+        cols = rc[:, 1].astype(np.int64)
+    else:
+        rows, cols = _lmf_chm_variable_ws(
+            chm=chm,
+            layout=layout,
+            ws=ws,
+            hmin=hmin,
+            shape=shape,
+        )
 
     x, y = layout.rowcol_to_cell_xy(rows, cols)
     # rowcol_to_cell_xy returns float64 already; ensure ascontiguousarray for

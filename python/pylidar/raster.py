@@ -14,7 +14,10 @@ dsmtin L140-144, spikefree L342-403), ``R/rasterize_canopy.R`` (L9-35),
   with right/bottom edge clamping; cell centers are
   ``(xmin + (col + 0.5) * xres, ymax - (row + 0.5) * yres)``. The CRS slot
   carries a :class:`pyproj.CRS` (``None`` if absent), per the user's
-  2026-05-11 Q2 decision.
+  2026-05-11 Q2 decision. :meth:`RasterLayout.from_lidr_extent` additionally
+  mirrors lidR ``st_adjust_bbox`` / ``raster_layout`` so demos can request
+  the same res-aligned CHM extent that ``rasterize_canopy(las, res, ...)``
+  would build.
 * :func:`rasterize_canopy_p2r` aggregates by **max** (lidR
   ``algorithm-dsm.R:57`` ``"max"``); empty cells are ``np.nan``. Subcircle
   **replaces** each input point with 8 equiangular satellites at radii
@@ -58,6 +61,10 @@ dsmtin L140-144, spikefree L342-403), ``R/rasterize_canopy.R`` (L9-35),
   work can pre-filter source points per-target. The kriging output is
   **not** numerically identical to gstat — different solvers, different
   conditioning — but the model and trend are the same.
+* :func:`focal_mean` mirrors the CHM smoothing idiom in lidR's Dalponte
+  example: ``terra::focal(chm, w = matrix(1,3,3), fun = mean, na.rm = TRUE)``.
+  It computes a centered moving-window mean, treats off-raster neighbours as
+  NA, ignores NaN values, and returns NaN only when the whole window is NaN.
 """
 
 from __future__ import annotations
@@ -68,6 +75,7 @@ from typing import Literal, Optional, Union
 import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial import Delaunay, cKDTree
+from scipy.ndimage import convolve
 
 try:  # pyproj is a runtime dep but keep import lazy-friendly for tooling.
     import pyproj
@@ -82,6 +90,7 @@ __all__ = [
     "rasterize_canopy_pitfree",
     "rasterize_canopy_dsmtin",
     "rasterize_canopy_spikefree",
+    "focal_mean",
 ]
 
 
@@ -140,6 +149,76 @@ class RasterLayout:
         ncol = max(int(np.ceil((xmax - xmin) / res)), 1)
         nrow = max(int(np.ceil((ymax - ymin) / res)), 1)
         return cls(xmin=xmin, ymax=ymax, xres=res, yres=res, ncol=ncol, nrow=nrow, crs=crs)
+
+    @classmethod
+    def from_lidr_extent(
+        cls,
+        xyz: NDArray[np.float64],
+        res: float,
+        *,
+        crs: Optional["pyproj.CRS"] = None,
+        start: tuple[float, float] = (0.0, 0.0),
+        buffer: float = 0.0,
+    ) -> "RasterLayout":
+        """Build the res-aligned layout used by lidR ``rasterize_canopy``.
+
+        This mirrors lidR ``st_adjust_bbox`` (``R/st_misc.R:14-23``) and
+        ``raster_layout`` (``R/utils_raster.R:355-400``). The input bbox is
+        shifted by half a cell before rounding to ``res`` so the outermost
+        points land inside cell centers exactly as they do in lidR.
+
+        Parameters
+        ----------
+        xyz : (N, 3) float64 ndarray
+            Source point cloud.
+        res : float
+            Square cell size.
+        crs : pyproj.CRS | None
+            CRS to carry on the layout.
+        start : (float, float), default (0, 0)
+            Grid origin used by lidR's ``start`` argument.
+        buffer : float, default 0
+            Extra extent buffer in world units, matching lidR's ``buffer``.
+        """
+        _check_xyz(xyz)
+        if xyz.shape[0] == 0:
+            raise ValueError("from_lidr_extent: xyz must have at least one point")
+        if not (res > 0.0):
+            raise ValueError("from_lidr_extent: res must be > 0")
+        if not (buffer >= 0.0):
+            raise ValueError("from_lidr_extent: buffer must be >= 0")
+        if len(start) != 2:
+            raise ValueError("from_lidr_extent: start must be a 2-tuple")
+
+        sx, sy = float(start[0]), float(start[1])
+
+        def round_any(value: float, accuracy: float) -> float:
+            # lidR round_any() calls roundc(), which is C++ std::round:
+            # halfway cases round away from zero, not NumPy/R banker's rounding.
+            q = value / accuracy
+            return float(np.sign(q) * np.floor(np.abs(q) + 0.5) * accuracy)
+
+        x_min = float(xyz[:, 0].min())
+        x_max = float(xyz[:, 0].max())
+        y_min = float(xyz[:, 1].min())
+        y_max = float(xyz[:, 1].max())
+
+        xmin = round_any(x_min - buffer - 0.5 * res - sx, res) + sx
+        xmax = round_any(x_max + buffer - 0.5 * res - sx, res) + res + sx
+        ymin = round_any(y_min - buffer - 0.5 * res - sy, res) + sy
+        ymax = round_any(y_max + buffer - 0.5 * res - sy, res) + res + sy
+
+        ncol = max(int(np.round((xmax - xmin) / res)), 1)
+        nrow = max(int(np.round((ymax - ymin) / res)), 1)
+        return cls(
+            xmin=float(xmin),
+            ymax=float(ymax),
+            xres=float(res),
+            yres=float(res),
+            ncol=ncol,
+            nrow=nrow,
+            crs=crs,
+        )
 
     def cell_xy_to_rowcol(
         self, x: NDArray[np.float64], y: NDArray[np.float64]
@@ -211,6 +290,54 @@ def rasterize_canopy_p2r(
     finite = np.isfinite(chm)
     chm[finite] = np.round(chm[finite], 3)
     return chm
+
+
+# ---------------------------------------------------------------- focal mean
+
+def focal_mean(
+    chm: NDArray[np.float64],
+    *,
+    window_size: int = 3,
+) -> NDArray[np.float64]:
+    """NaN-aware moving-window mean for CHM rasters.
+
+    Mirrors the smoothing step used in lidR's Dalponte example:
+    ``terra::focal(chm, w = matrix(1,3,3), fun = mean, na.rm = TRUE)``.
+    The window is centered on each cell; off-raster neighbours are treated
+    as NA and ignored. Cells whose full window is NA remain NaN.
+
+    Parameters
+    ----------
+    chm : (H, W) float64 ndarray
+        Canopy height model.
+    window_size : odd positive int, default 3
+        Side length of the square mean window.
+
+    Returns
+    -------
+    (H, W) float64 ndarray
+        Smoothed CHM.
+    """
+    if not isinstance(chm, np.ndarray):
+        raise TypeError("focal_mean: chm must be a numpy ndarray")
+    if chm.dtype != np.float64:
+        raise TypeError("focal_mean: chm must be float64")
+    if chm.ndim != 2:
+        raise ValueError("focal_mean: chm must have shape (H, W)")
+    if not isinstance(window_size, (int, np.integer)):
+        raise TypeError("focal_mean: window_size must be an integer")
+    if window_size <= 0 or window_size % 2 == 0:
+        raise ValueError("focal_mean: window_size must be a positive odd integer")
+
+    kernel = np.ones((int(window_size), int(window_size)), dtype=np.float64)
+    valid = ~np.isnan(chm)
+    values = np.where(valid, chm, 0.0)
+    sums = convolve(values, kernel, mode="constant", cval=0.0)
+    counts = convolve(valid.astype(np.float64), kernel, mode="constant", cval=0.0)
+
+    out = np.full(chm.shape, np.nan, dtype=np.float64)
+    np.divide(sums, counts, out=out, where=counts > 0.0)
+    return out
 
 
 def _subcircle_satellites(

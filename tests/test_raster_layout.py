@@ -45,6 +45,59 @@ def test_from_extent_empty_raises():
         RasterLayout.from_extent(xyz, res=1.0)
 
 
+def test_from_lidr_extent_matches_st_adjust_bbox_grid():
+    """lidR st_adjust_bbox shifts by half a cell, rounds to res, then
+    expands the upper/right edges by one cell."""
+    xyz = np.array([
+        [0.2, 0.2, 1.0],
+        [9.8, 4.8, 5.0],
+    ], dtype=np.float64)
+    layout = RasterLayout.from_lidr_extent(xyz, res=1.0)
+    assert layout.xmin == 0.0
+    assert layout.xmax == 10.0
+    assert layout.ymin == 0.0
+    assert layout.ymax == 5.0
+    assert layout.ncol == 10
+    assert layout.nrow == 5
+
+
+def test_from_lidr_extent_rounds_half_away_from_zero_like_lidr_roundc():
+    xyz = np.array([
+        [481280.5, 3812940.5, 1.0],
+        [481281.0, 3812941.0, 5.0],
+    ], dtype=np.float64)
+    layout = RasterLayout.from_lidr_extent(xyz, res=0.5)
+    assert layout.xmin == 481280.5
+    assert layout.xmax == 481281.5
+    assert layout.ymin == 3812940.5
+    assert layout.ymax == 3812941.5
+    assert layout.shape == (2, 2)
+
+
+def test_from_lidr_extent_buffer_expands_layout():
+    xyz = np.array([
+        [0.2, 0.2, 1.0],
+        [9.8, 4.8, 5.0],
+    ], dtype=np.float64)
+    layout = RasterLayout.from_lidr_extent(xyz, res=1.0, buffer=1.0)
+    assert layout.xmin == -1.0
+    assert layout.xmax == 11.0
+    assert layout.ymin == -1.0
+    assert layout.ymax == 6.0
+    assert layout.shape == (7, 12)
+
+
+def test_from_lidr_extent_rejects_invalid_inputs():
+    with pytest.raises(TypeError):
+        RasterLayout.from_lidr_extent(np.zeros((2, 3), dtype=np.float32), res=1.0)
+    with pytest.raises(ValueError):
+        RasterLayout.from_lidr_extent(np.zeros((0, 3), dtype=np.float64), res=1.0)
+    with pytest.raises(ValueError):
+        RasterLayout.from_lidr_extent(
+            np.zeros((2, 3), dtype=np.float64), res=0.0
+        )
+
+
 def test_xmax_ymin_derived():
     layout = RasterLayout(xmin=0.0, ymax=10.0, xres=2.0, yres=2.0, ncol=5, nrow=3)
     assert layout.xmax == 10.0  # 0 + 5*2

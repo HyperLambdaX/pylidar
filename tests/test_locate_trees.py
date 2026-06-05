@@ -178,6 +178,21 @@ def _three_peak_chm():
     return chm, layout
 
 
+def _adaptive_two_peak_chm():
+    """5x5 CHM where a large variable window suppresses the lower peak."""
+    chm = np.array([
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0],
+        [0, 10, 0, 9, 0],
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0],
+    ], dtype=np.float64)
+    layout = RasterLayout(
+        xmin=0.0, ymax=5.0, xres=1.0, yres=1.0, ncol=5, nrow=5, crs=None,
+    )
+    return chm, layout
+
+
 def test_locate_trees_chm_finds_three_peaks_incremental():
     chm, layout = _three_peak_chm()
     tt = locate_trees_chm(chm, layout, ws=1.0, hmin=2.0)
@@ -230,6 +245,81 @@ def test_locate_trees_chm_hmin_filters():
     tt = locate_trees_chm(chm, layout, ws=1.0, hmin=8.5)
     assert tt.n == 1
     assert tt.z[0] == 9.0
+
+
+def test_locate_trees_chm_callable_ws_matches_lidr_variable_window_path():
+    chm, layout = _adaptive_two_peak_chm()
+    fixed = locate_trees_chm(chm, layout, ws=1.0, hmin=2.0)
+    assert sorted(fixed.z.tolist()) == [9.0, 10.0]
+
+    calls: list[float] = []
+
+    def adaptive_ws(z: float) -> float:
+        calls.append(z)
+        return max(1.0, z * 0.6)
+
+    variable = locate_trees_chm(chm, layout, ws=adaptive_ws, hmin=2.0)
+    assert variable.n == 1
+    assert variable.z[0] == 10.0
+    assert len(calls) == chm.size
+    assert not any(np.isnan(z) for z in calls)
+
+
+def test_locate_trees_chm_2d_ws_array_uses_non_nan_cells_only():
+    chm, layout = _adaptive_two_peak_chm()
+    chm[0, 0] = np.nan
+    ws_grid = np.maximum(1.0, np.nan_to_num(chm, nan=0.0) * 0.6).astype(
+        np.float64
+    )
+    ws_grid[0, 0] = -1.0  # ignored because the matching CHM cell is NaN
+
+    tt = locate_trees_chm(chm, layout, ws=ws_grid, hmin=2.0)
+    assert tt.n == 1
+    assert tt.z[0] == 10.0
+
+
+def test_locate_trees_chm_1d_ws_array_is_valid_cell_row_major_order():
+    chm, layout = _adaptive_two_peak_chm()
+    chm[0, 0] = np.nan
+    valid = ~np.isnan(chm)
+    ws_grid = np.maximum(1.0, np.nan_to_num(chm, nan=0.0) * 0.6).astype(
+        np.float64
+    )
+    ws_vec = np.ascontiguousarray(ws_grid[valid], dtype=np.float64)
+
+    tt = locate_trees_chm(chm, layout, ws=ws_vec, hmin=2.0)
+    assert tt.n == 1
+    assert tt.z[0] == 10.0
+
+
+def test_locate_trees_chm_variable_ws_rejects_bad_array_inputs():
+    chm, layout = _adaptive_two_peak_chm()
+    with pytest.raises(TypeError, match="ws array must be float64"):
+        locate_trees_chm(chm, layout, ws=np.ones(chm.shape, dtype=np.float32))
+    with pytest.raises(ValueError, match="ws array must have shape"):
+        locate_trees_chm(chm, layout, ws=np.ones((2,), dtype=np.float64))
+
+
+@pytest.mark.parametrize("bad_value", [-1.0, 0.0, np.nan])
+def test_locate_trees_chm_variable_ws_rejects_bad_values_on_valid_cells(
+    bad_value,
+):
+    chm, layout = _adaptive_two_peak_chm()
+    ws_grid = np.maximum(1.0, chm * 0.6).astype(np.float64)
+    ws_grid[2, 1] = bad_value
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        locate_trees_chm(chm, layout, ws=ws_grid, hmin=2.0)
+
+
+def test_locate_trees_chm_variable_ws_allows_non_square_pixels():
+    chm, _ = _adaptive_two_peak_chm()
+    layout = RasterLayout(
+        xmin=0.0, ymax=10.0, xres=1.0, yres=2.0, ncol=5, nrow=5, crs=None,
+    )
+    tt = locate_trees_chm(chm, layout, ws=lambda z: max(1.0, z * 0.6), hmin=2.0)
+    assert tt.n == 1
+    assert tt.z[0] == 10.0
 
 
 def test_locate_trees_chm_invalid_shape_raises():
