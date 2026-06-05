@@ -3,5 +3,5 @@ nanobind_add_module(_core
     STABLE_ABI
     module.cpp
 )
-target_link_libraries(_core PRIVATE pylidar_core_its)
+target_link_libraries(_core PRIVATE pylidar_core_its pylidar_core_ground)
 install(TARGETS _core LIBRARY DESTINATION pylidar)

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -9,11 +10,13 @@
 #include <nanobind/stl/string.h>
 
 #include "chm_smooth.hpp"
+#include "csf.hpp"
 #include "dalponte2016.hpp"
 #include "li2012.hpp"
 #include "lmf.hpp"
 #include "matrix2d.hpp"
 #include "point.hpp"
+#include "pmf.hpp"
 #include "watershed_ext.hpp"
 
 namespace nb = nanobind;
@@ -22,6 +25,7 @@ using namespace nb::literals;
 using Float64Mat    = nb::ndarray<const double,  nb::numpy, nb::ndim<2>, nb::c_contig>;
 using Float64Vec    = nb::ndarray<const double,  nb::numpy, nb::ndim<1>, nb::c_contig>;
 using Int32Mat      = nb::ndarray<const int32_t, nb::numpy, nb::ndim<2>, nb::c_contig>;
+using BoolVec       = nb::ndarray<const bool,    nb::numpy, nb::ndim<1>, nb::c_contig>;
 using Int32MatOut   = nb::ndarray<int32_t,       nb::numpy, nb::ndim<2>, nb::c_contig>;
 using Int32VecOut   = nb::ndarray<int32_t,       nb::numpy, nb::ndim<1>, nb::c_contig>;
 using BoolVecOut    = nb::ndarray<bool,          nb::numpy, nb::ndim<1>, nb::c_contig>;
@@ -175,6 +179,137 @@ BoolVecOut lmf_points_binding(Float64Mat xyz,
 
     bool* out = new bool[N];
     for (std::size_t i = 0; i < N; ++i) out[i] = static_cast<bool>(lm_char[i]);
+
+    nb::capsule owner(out, [](void* p) noexcept {
+        delete[] static_cast<bool*>(p);
+    });
+    std::size_t shape_arr[1] = {N};
+    return BoolVecOut(out, 1, shape_arr, owner);
+}
+
+// ─────────────────── pmf_ground ───────────────────
+BoolVecOut pmf_ground_binding(Float64Mat xyz,
+                              Float64Vec ws,
+                              Float64Vec th,
+                              BoolVec candidate_mask) {
+    if (xyz.shape(1) != 3) {
+        throw std::invalid_argument("pmf_ground: xyz must have shape (N, 3)");
+    }
+    const std::size_t N = xyz.shape(0);
+    if (candidate_mask.shape(0) != N) {
+        throw std::invalid_argument(
+            "pmf_ground: candidate_mask length must equal xyz row count");
+    }
+    if (ws.shape(0) != th.shape(0)) {
+        throw std::invalid_argument("pmf_ground: ws and th length mismatch");
+    }
+
+    std::vector<pylidar::core::PointXYZ> pts(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        const double x = xyz.data()[i * 3 + 0];
+        const double y = xyz.data()[i * 3 + 1];
+        const double z = xyz.data()[i * 3 + 2];
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            throw std::invalid_argument("pmf_ground: xyz must be finite");
+        }
+        pts[i] = {x, y, z};
+    }
+
+    std::vector<double> ws_vec(ws.data(), ws.data() + ws.shape(0));
+    std::vector<double> th_vec(th.data(), th.data() + th.shape(0));
+    for (double w : ws_vec) {
+        if (!std::isfinite(w) || !(w > 0.0)) {
+            throw std::invalid_argument("pmf_ground: ws must be finite and > 0");
+        }
+    }
+    for (double t : th_vec) {
+        if (!std::isfinite(t) || !(t > 0.0)) {
+            throw std::invalid_argument("pmf_ground: th must be finite and > 0");
+        }
+    }
+
+    std::vector<char> candidate(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        candidate[i] = candidate_mask.data()[i] ? 1 : 0;
+    }
+
+    std::vector<char> ground = pylidar::core::ground::pmf_ground(
+        pts, ws_vec, th_vec, candidate);
+
+    bool* out = new bool[N];
+    for (std::size_t i = 0; i < N; ++i) out[i] = static_cast<bool>(ground[i]);
+
+    nb::capsule owner(out, [](void* p) noexcept {
+        delete[] static_cast<bool*>(p);
+    });
+    std::size_t shape_arr[1] = {N};
+    return BoolVecOut(out, 1, shape_arr, owner);
+}
+
+// ─────────────────── csf_ground ───────────────────
+BoolVecOut csf_ground_binding(Float64Mat xyz,
+                              BoolVec candidate_mask,
+                              bool slope_smooth,
+                              double class_threshold,
+                              double cloth_resolution,
+                              int rigidness,
+                              int iterations,
+                              double time_step) {
+    if (xyz.shape(1) != 3) {
+        throw std::invalid_argument("csf_ground: xyz must have shape (N, 3)");
+    }
+    const std::size_t N = xyz.shape(0);
+    if (candidate_mask.shape(0) != N) {
+        throw std::invalid_argument(
+            "csf_ground: candidate_mask length must equal xyz row count");
+    }
+    if (!std::isfinite(class_threshold) || !(class_threshold > 0.0)) {
+        throw std::invalid_argument(
+            "csf_ground: class_threshold must be finite and > 0");
+    }
+    if (!std::isfinite(cloth_resolution) || !(cloth_resolution > 0.0)) {
+        throw std::invalid_argument(
+            "csf_ground: cloth_resolution must be finite and > 0");
+    }
+    if (!(rigidness >= 1 && rigidness <= 3)) {
+        throw std::invalid_argument("csf_ground: rigidness must be in [1, 3]");
+    }
+    if (!(iterations > 0)) {
+        throw std::invalid_argument("csf_ground: iterations must be > 0");
+    }
+    if (!std::isfinite(time_step) || !(time_step > 0.0)) {
+        throw std::invalid_argument("csf_ground: time_step must be finite and > 0");
+    }
+
+    std::vector<pylidar::core::PointXYZ> pts(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        const double x = xyz.data()[i * 3 + 0];
+        const double y = xyz.data()[i * 3 + 1];
+        const double z = xyz.data()[i * 3 + 2];
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            throw std::invalid_argument("csf_ground: xyz must be finite");
+        }
+        pts[i] = {x, y, z};
+    }
+
+    std::vector<char> candidate(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        candidate[i] = candidate_mask.data()[i] ? 1 : 0;
+    }
+
+    pylidar::core::ground::CsfParams params;
+    params.slope_smooth = slope_smooth;
+    params.class_threshold = class_threshold;
+    params.cloth_resolution = cloth_resolution;
+    params.rigidness = rigidness;
+    params.iterations = iterations;
+    params.time_step = time_step;
+
+    std::vector<char> ground = pylidar::core::ground::csf_ground(
+        pts, candidate, params);
+
+    bool* out = new bool[N];
+    for (std::size_t i = 0; i < N; ++i) out[i] = static_cast<bool>(ground[i]);
 
     nb::capsule owner(out, [](void* p) noexcept {
         delete[] static_cast<bool*>(p);
@@ -341,6 +476,35 @@ NB_MODULE(_core, m) {
           "chm:    (H, W) float64, C-contiguous.\n"
           "ws:     window size in **pixel** units (not world).\n"
           "Returns: (K, 2) int32 — (row, col) indices of detected maxima.");
+
+    m.def("pmf_ground", &pmf_ground_binding,
+          nb::kw_only(),
+          "xyz"_a.noconvert(),
+          "ws"_a.noconvert(),
+          "th"_a.noconvert(),
+          "candidate_mask"_a.noconvert(),
+          "Progressive morphological filter ground classification.\n"
+          "xyz:            (N, 3) float64, C-contiguous and finite.\n"
+          "ws:             (K,) float64 positive window sizes.\n"
+          "th:             (K,) float64 positive thresholds.\n"
+          "candidate_mask: (N,) bool initial ground candidates.\n"
+          "Returns:        (N,) bool, true = ground.");
+
+    m.def("csf_ground", &csf_ground_binding,
+          nb::kw_only(),
+          "xyz"_a.noconvert(),
+          "candidate_mask"_a.noconvert(),
+          "slope_smooth"_a     = false,
+          "class_threshold"_a  = 0.5,
+          "cloth_resolution"_a = 0.5,
+          "rigidness"_a        = 1,
+          "iterations"_a       = 500,
+          "time_step"_a        = 0.65,
+          "Cloth Simulation Filter ground classification (jianboqi/CSF).\n"
+          "xyz:            (N, 3) float64, C-contiguous and finite.\n"
+          "candidate_mask: (N,) bool initial ground candidates; only these\n"
+          "                points are passed to CSF, then mapped back.\n"
+          "Returns:        (N,) bool, true = ground.");
 
     m.def("watershed_ext", &watershed_ext_binding,
           nb::kw_only(),

@@ -47,11 +47,19 @@ def make_forest_las(
     version: str = "1.2",
     seed: int = 0,
     crs_epsg: Optional[int] = None,
+    z_offset: float = 0.0,
+    ground_slope: float = 0.0,
 ) -> Path:
     """Write a small synthetic forest LAS to ``out_path`` and return the path.
 
     Parameters mirror the rd.md row-13 requirement: small (≤ 1k points),
     3-5 fake trees, deterministic given ``seed``.
+
+    ``z_offset`` shifts every point's Z by a constant and ``ground_slope`` adds
+    ``ground_slope * x`` to every point's Z. Both are applied uniformly to
+    ground and tree points, so tree bases keep sitting on the local ground.
+    Together they synthesize a tilted, possibly negative-elevation terrain
+    (the 10kV-corridor case) without changing height-above-ground structure.
     """
     rng = np.random.default_rng(seed)
 
@@ -101,6 +109,10 @@ def make_forest_las(
     xs_arr = np.asarray(xs, dtype=np.float64)
     ys_arr = np.asarray(ys, dtype=np.float64)
     zs_arr = np.asarray(zs, dtype=np.float64)
+    # Apply a uniform terrain offset/slope (default no-op) so callers can
+    # synthesize negative or tilted absolute elevations without disturbing the
+    # ground-relative geometry the ITS pipeline ultimately cares about.
+    zs_arr = zs_arr + float(z_offset) + float(ground_slope) * xs_arr
     rn_arr = np.asarray(return_numbers, dtype=np.uint8)
     cls_arr = np.asarray(classifications, dtype=np.uint8)
     n = xs_arr.shape[0]

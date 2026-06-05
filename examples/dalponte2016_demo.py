@@ -85,6 +85,36 @@ def _rgb_for_writer(tree_id: np.ndarray, las_in: laspy.LasData) -> np.ndarray | 
     return None
 
 
+def _write_rgb_las(
+    las_in: laspy.LasData, tree_id: np.ndarray, out_path: Path, *, seed: int = 0
+) -> None:
+    """Write a viewer-friendly LAS with baked per-tree RGB.
+
+    The faithful output keeps the input's point format (often format 0, no
+    RGB), so CloudCompare can only colour it by the ``treeID`` scalar — and the
+    NA sentinel (2^31-1) then crushes every real tree ID into one bin. This
+    companion file upgrades to an RGB-capable format and bakes a distinct
+    colour per tree (grey for masked / unassigned points) so individual crowns
+    are visible immediately in RGB mode, no scalar-range fiddling required.
+    """
+    header = laspy.LasHeader(point_format=2, version="1.2")
+    header.scales = las_in.header.scales
+    header.offsets = las_in.header.offsets
+    try:  # carry CRS when present so coordinates stay georeferenced
+        crs = las_in.header.parse_crs()
+        if crs is not None:
+            header.add_crs(crs)
+    except Exception:
+        pass
+    out = laspy.LasData(header)
+    out.x = np.asarray(las_in.x)
+    out.y = np.asarray(las_in.y)
+    out.z = np.asarray(las_in.z)
+    rgb = _rgb_for_tree_id(tree_id, seed=seed)
+    out.red, out.green, out.blue = rgb[:, 0], rgb[:, 1], rgb[:, 2]
+    out.write(str(out_path))
+
+
 def _read_filter_kwargs(
     *,
     keep_first: bool,
@@ -99,6 +129,41 @@ def _read_filter_kwargs(
     if drop_z_below is not None:
         kwargs["drop_z_below"] = float(drop_z_below)
     return kwargs
+
+
+def _derive_ground_candidate_mask(las: laspy.LasData) -> tuple[np.ndarray, str]:
+    n = len(las.x)
+    try:
+        rn = np.asarray(las.return_number)
+        nr = np.asarray(las.number_of_returns)
+    except Exception:
+        return np.ones(n, dtype=np.bool_), "all_points"
+    if rn.shape[0] != n or nr.shape[0] != n:
+        return np.ones(n, dtype=np.bool_), "all_points"
+    mask = (nr > 0) & (rn == nr)
+    if not mask.any():
+        return np.ones(n, dtype=np.bool_), "all_points"
+    return np.ascontiguousarray(mask, dtype=np.bool_), "last_returns"
+
+
+def _treeid_na_value(tree_id: np.ndarray) -> int | float:
+    if np.issubdtype(tree_id.dtype, np.integer):
+        return int(np.iinfo(tree_id.dtype).max)
+    if np.issubdtype(tree_id.dtype, np.floating):
+        return float(np.finfo(tree_id.dtype).tiny)
+    raise TypeError("tree_id must be integer or floating")
+
+
+def _mask_treeid_below(
+    tree_id: np.ndarray,
+    z_norm: np.ndarray,
+    threshold: float | None,
+) -> np.ndarray:
+    if threshold is None:
+        return tree_id
+    out = tree_id.copy()
+    out[z_norm < float(threshold)] = _treeid_na_value(out)
+    return out
 
 
 def _layout_crs(las: laspy.LasData):
@@ -170,6 +235,22 @@ def main(
     th_seed: float = 0.45,
     th_cr: float = 0.55,
     max_cr: float = 10.0,
+    normalize: bool = True,
+    ground_method: str = "csf",
+    csf_slope_smooth: bool = False,
+    csf_class_threshold: float = 0.5,
+    csf_cloth_resolution: float = 0.5,
+    csf_rigidness: int = 1,
+    csf_iterations: int = 500,
+    csf_time_step: float = 0.65,
+    gnd_b: float = 2.0,
+    gnd_dh0: float = 0.5,
+    gnd_dhmax: float = 3.0,
+    gnd_s: float = 1.0,
+    gnd_max_ws: float = 20.0,
+    gnd_exp: bool = False,
+    normalize_method: str = "tin",
+    mask_treeid_z_below: float | None = None,
     uniqueness: str = "incremental",
     export_treetops: bool = False,
     export_chm: bool = False,
@@ -198,6 +279,97 @@ def main(
         f"{float(xyz[:, 2].min()):.2f} .. {float(xyz[:, 2].max()):.2f} m"
     )
 
+    norm_meta: dict = {
+        "normalize": bool(normalize),
+        "ground_algorithm": None,
+        "ground_candidate_source": None,
+        "ground_candidates": None,
+        "ground_points": None,
+        "normalize_method": None,
+        "normalize_fallback_counts": None,
+        "mask_treeid_z_below": None,
+    }
+    xyz_seg = xyz
+    z_for_mask = xyz[:, 2]
+    # With normalization enabled this threshold is interpreted on normalized
+    # height. With --no-normalize it necessarily applies to raw Z, which is
+    # mainly useful for explicit raw-path comparisons.
+    effective_mask_threshold = (
+        0.0 if normalize and mask_treeid_z_below is None else mask_treeid_z_below
+    )
+    if normalize:
+        candidate_mask, candidate_source = _derive_ground_candidate_mask(las_in)
+        if ground_method == "csf":
+            ground_algorithm = pylidar.ground.csf(
+                slope_smooth=bool(csf_slope_smooth),
+                class_threshold=float(csf_class_threshold),
+                cloth_resolution=float(csf_cloth_resolution),
+                rigidness=int(csf_rigidness),
+                iterations=int(csf_iterations),
+                time_step=float(csf_time_step),
+            )
+            ground_params = {
+                "csf_slope_smooth": bool(csf_slope_smooth),
+                "csf_class_threshold": float(csf_class_threshold),
+                "csf_cloth_resolution": float(csf_cloth_resolution),
+                "csf_rigidness": int(csf_rigidness),
+                "csf_iterations": int(csf_iterations),
+                "csf_time_step": float(csf_time_step),
+            }
+        elif ground_method == "pmf":
+            gnd_ws, gnd_th = pylidar.ground.util_makeZhangParam(
+                b=float(gnd_b),
+                dh0=float(gnd_dh0),
+                dhmax=float(gnd_dhmax),
+                s=float(gnd_s),
+                max_ws=float(gnd_max_ws),
+                exp=bool(gnd_exp),
+            )
+            ground_algorithm = pylidar.ground.pmf(ws=gnd_ws, th=gnd_th)
+            ground_params = {
+                "ground_ws": [float(v) for v in gnd_ws],
+                "ground_th": [float(v) for v in gnd_th],
+            }
+        else:
+            raise ValueError("ground_method must be 'csf' or 'pmf'")
+
+        ground_mask = pylidar.ground.classify_ground(
+            xyz=xyz,
+            algorithm=ground_algorithm,
+            candidate_mask=candidate_mask,
+        )
+        norm = pylidar.normalize.normalize_height_with_metadata(
+            xyz=xyz,
+            ground_mask=ground_mask,
+            method=normalize_method,  # type: ignore[arg-type]
+        )
+        xyz_seg = xyz.copy()
+        xyz_seg[:, 2] = norm.z
+        z_for_mask = norm.z
+        norm_meta.update(
+            {
+                "normalize": True,
+                "ground_algorithm": ground_algorithm.name,
+                "ground_candidate_source": candidate_source,
+                "ground_candidates": int(candidate_mask.sum()),
+                "ground_points": int(ground_mask.sum()),
+                "normalize_method": norm.method,
+                "normalize_fallback_counts": {
+                    k: int(v) for k, v in norm.fallback_counts.items()
+                },
+                "mask_treeid_z_below": effective_mask_threshold,
+                **ground_params,
+            }
+        )
+        print(
+            f"  normalized heights with {ground_algorithm.name}/{normalize_method}: "
+            f"{int(ground_mask.sum())} ground points from "
+            f"{candidate_source}; z_norm range "
+            f"{float(norm.z.min()):.2f} .. {float(norm.z.max()):.2f} m"
+        )
+    else:
+        norm_meta["mask_treeid_z_below"] = effective_mask_threshold
+
     print(
         "\n[dalponte2016] p2r(subcircle={:.3g}) -> focal mean {}x{} -> "
         "lmf(ws={}m, hmin={}m) -> dalponte2016".format(
@@ -207,10 +379,10 @@ def main(
     t0 = time.perf_counter()
 
     layout = pylidar.raster.RasterLayout.from_lidr_extent(
-        xyz, res=float(res), crs=_layout_crs(las_in)
+        xyz_seg, res=float(res), crs=_layout_crs(las_in)
     )
     raw_chm = pylidar.raster.rasterize_canopy_p2r(
-        xyz, layout, subcircle=float(subcircle)
+        xyz_seg, layout, subcircle=float(subcircle)
     )
     chm = np.ascontiguousarray(
         pylidar.raster.focal_mean(raw_chm, window_size=int(focal_size)),
@@ -232,7 +404,8 @@ def main(
         th_cr=float(th_cr),
         max_cr=float(max_cr),
     )
-    tree_id = pylidar.segment_trees(xyz, layout, raster_labels=labels)
+    tree_id = pylidar.segment_trees(xyz_seg, layout, raster_labels=labels)
+    tree_id = _mask_treeid_below(tree_id, z_for_mask, effective_mask_threshold)
 
     out_path = out_dir / "dalponte2016.las"
     pylidar.io.write_las_with_treeid(
@@ -242,6 +415,10 @@ def main(
         rgb=_rgb_for_writer(tree_id, las_in),
         uniqueness=uniqueness,
     )
+    # Always emit a viewer-friendly RGB copy so per-tree colours show up
+    # directly in CloudCompare even when the input format has no RGB channel.
+    rgb_path = out_dir / "dalponte2016_rgb.las"
+    _write_rgb_las(las_in, tree_id, rgb_path)
     dt = time.perf_counter() - t0
     _summary(dt, tree_id, treetops.n)
 
@@ -263,10 +440,12 @@ def main(
                 "th_seed": float(th_seed),
                 "th_cr": float(th_cr),
                 "max_cr": float(max_cr),
+                **norm_meta,
             },
         )
 
     print(f"\ndone - wrote {out_path}")
+    print(f"       wrote {rgb_path} (per-tree RGB; open this in CloudCompare)")
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -287,6 +466,51 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     ap.add_argument("--th-seed", type=float, default=0.45)
     ap.add_argument("--th-cr", type=float, default=0.55)
     ap.add_argument("--max-cr", type=float, default=10.0)
+    ap.add_argument(
+        "--no-normalize",
+        action="store_true",
+        help="skip ground classification and height normalization",
+    )
+    ap.add_argument(
+        "--ground-method",
+        choices=("csf", "pmf"),
+        default="csf",
+        help="ground classification method used before normalization",
+    )
+    ap.add_argument("--csf-class-threshold", type=float, default=0.5)
+    ap.add_argument("--csf-cloth-resolution", type=float, default=0.5)
+    ap.add_argument("--csf-rigidness", type=int, default=1)
+    ap.add_argument("--csf-iterations", type=int, default=500)
+    ap.add_argument("--csf-time-step", type=float, default=0.65)
+    ap.add_argument(
+        "--csf-slope-smooth",
+        dest="csf_slope_smooth",
+        action="store_true",
+        default=False,
+    )
+    ap.add_argument(
+        "--no-csf-slope-smooth",
+        dest="csf_slope_smooth",
+        action="store_false",
+    )
+    ap.add_argument("--gnd-b", type=float, default=2.0)
+    ap.add_argument("--gnd-dh0", type=float, default=0.5)
+    ap.add_argument("--gnd-dhmax", type=float, default=3.0)
+    ap.add_argument("--gnd-s", type=float, default=1.0)
+    ap.add_argument("--gnd-max-ws", type=float, default=20.0)
+    ap.add_argument("--gnd-exp", action="store_true")
+    ap.add_argument(
+        "--normalize-method",
+        choices=("tin", "knnidw", "kriging"),
+        default="tin",
+    )
+    ap.add_argument(
+        "--mask-treeid-z-below",
+        type=float,
+        default=None,
+        metavar="Z",
+        help="mask treeID for points below this segmentation-height threshold",
+    )
     ap.add_argument(
         "--uniqueness",
         choices=("incremental", "gpstime", "bitmerge"),
@@ -315,6 +539,22 @@ if __name__ == "__main__":
         th_seed=args.th_seed,
         th_cr=args.th_cr,
         max_cr=args.max_cr,
+        normalize=not args.no_normalize,
+        ground_method=args.ground_method,
+        csf_slope_smooth=args.csf_slope_smooth,
+        csf_class_threshold=args.csf_class_threshold,
+        csf_cloth_resolution=args.csf_cloth_resolution,
+        csf_rigidness=args.csf_rigidness,
+        csf_iterations=args.csf_iterations,
+        csf_time_step=args.csf_time_step,
+        gnd_b=args.gnd_b,
+        gnd_dh0=args.gnd_dh0,
+        gnd_dhmax=args.gnd_dhmax,
+        gnd_s=args.gnd_s,
+        gnd_max_ws=args.gnd_max_ws,
+        gnd_exp=args.gnd_exp,
+        normalize_method=args.normalize_method,
+        mask_treeid_z_below=args.mask_treeid_z_below,
         uniqueness=args.uniqueness,
         export_treetops=args.export_treetops,
         export_chm=args.export_chm,

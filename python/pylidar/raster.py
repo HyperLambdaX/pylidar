@@ -74,8 +74,14 @@ from typing import Literal, Optional, Union
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.spatial import Delaunay, cKDTree
+from scipy.spatial import Delaunay
 from scipy.ndimage import convolve
+
+from ._interp import (
+    knnidw_interpolate,
+    kriging_interpolate,
+    tin_interpolate,
+)
 
 try:  # pyproj is a runtime dep but keep import lazy-friendly for tooling.
     import pyproj
@@ -425,12 +431,14 @@ def _apply_na_fill(
     fill_x = tgt_x[in_hull]
     fill_y = tgt_y[in_hull]
 
+    src_xy = np.column_stack([src_x, src_y])
+    fill_xy = np.column_stack([fill_x, fill_y])
     if method == "tin":
-        filled = _tin_interp(src_x, src_y, src_z, fill_x, fill_y)
+        filled = tin_interpolate(src_xy, src_z, fill_xy, extrapolate=None)
     elif method == "knnidw":
-        filled = _knn_idw(src_x, src_y, src_z, fill_x, fill_y, k=10, p=2.0)
+        filled = knnidw_interpolate(src_xy, src_z, fill_xy, k=10, p=2.0)
     else:  # kriging
-        filled = _kriging(src_x, src_y, src_z, fill_x, fill_y)
+        filled = kriging_interpolate(src_xy, src_z, fill_xy)
 
     out = chm.copy()
     # Index into the (rows,cols) of NaN cells that survived the hull mask.
@@ -455,72 +463,6 @@ def _convex_hull_mask(
         # Collinear / coplanar — fall back to no restriction.
         return np.ones(tx.shape, dtype=np.bool_)
     return tri.find_simplex(np.column_stack([tx, ty])) >= 0
-
-
-def _tin_interp(
-    sx: NDArray[np.float64],
-    sy: NDArray[np.float64],
-    sz: NDArray[np.float64],
-    tx: NDArray[np.float64],
-    ty: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    if sx.size < 3:
-        return np.full(tx.shape, np.nan, dtype=np.float64)
-    # Use scipy LinearNDInterpolator under the hood.
-    from scipy.interpolate import LinearNDInterpolator
-    interp = LinearNDInterpolator(np.column_stack([sx, sy]), sz, fill_value=np.nan)
-    return interp(np.column_stack([tx, ty]))
-
-
-def _knn_idw(
-    sx: NDArray[np.float64],
-    sy: NDArray[np.float64],
-    sz: NDArray[np.float64],
-    tx: NDArray[np.float64],
-    ty: NDArray[np.float64],
-    *,
-    k: int,
-    p: float,
-) -> NDArray[np.float64]:
-    if sx.size == 0:
-        return np.full(tx.shape, np.nan, dtype=np.float64)
-    tree = cKDTree(np.column_stack([sx, sy]))
-    k_eff = min(k, sx.size)
-    d, idx = tree.query(np.column_stack([tx, ty]), k=k_eff)
-    if k_eff == 1:
-        d = d[:, None]
-        idx = idx[:, None]
-    # Guard against d == 0 (target coincides with source).
-    weights = 1.0 / np.maximum(d, 1e-12) ** p
-    weights /= weights.sum(axis=1, keepdims=True)
-    return (sz[idx] * weights).sum(axis=1)
-
-
-def _kriging(
-    sx: NDArray[np.float64],
-    sy: NDArray[np.float64],
-    sz: NDArray[np.float64],
-    tx: NDArray[np.float64],
-    ty: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    if sx.size < 3:
-        return np.full(tx.shape, np.nan, dtype=np.float64)
-    from pykrige.uk import UniversalKriging
-
-    # gstat::vgm(0.59, "Sph", 874) → psill=0.59, range=874, nugget=0
-    # universal kriging with linear (regional) drift = Z ~ X + Y
-    uk = UniversalKriging(
-        sx,
-        sy,
-        sz,
-        variogram_model="spherical",
-        variogram_parameters=[0.59, 874.0, 0.0],
-        drift_terms=["regional_linear"],
-        verbose=False,
-        enable_plotting=False,
-    )
-    z_pred, _ = uk.execute("points", tx, ty)
-    return np.asarray(z_pred, dtype=np.float64)
 
 
 # ---------------------------------------------------------------- pitfree / dsmtin

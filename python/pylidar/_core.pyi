@@ -43,6 +43,26 @@ def lmf_chm(
     shape: str = "circular",
 ) -> NDArray[np.int32]: ...
 
+def pmf_ground(
+    *,
+    xyz: NDArray[np.float64],
+    ws: NDArray[np.float64],
+    th: NDArray[np.float64],
+    candidate_mask: NDArray[np.bool_],
+) -> NDArray[np.bool_]: ...
+
+def csf_ground(
+    *,
+    xyz: NDArray[np.float64],
+    candidate_mask: NDArray[np.bool_],
+    slope_smooth: bool = False,
+    class_threshold: float = 0.5,
+    cloth_resolution: float = 0.5,
+    rigidness: int = 1,
+    iterations: int = 500,
+    time_step: float = 0.65,
+) -> NDArray[np.bool_]: ...
+
 def watershed_ext(
     *,
     chm: NDArray[np.float64],

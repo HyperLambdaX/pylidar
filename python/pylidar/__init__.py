@@ -8,6 +8,8 @@ dispatch entry. Modules:
 * :mod:`pylidar.decimate` — top-of-canopy decimators
 * :mod:`pylidar.locate_trees` — Treetops dataclass + locate_trees_chm/_points
 * :mod:`pylidar.segmentation` — ITS algorithms (low-level primitives + lidR-shaped wrappers)
+* :mod:`pylidar.ground` — ground classification
+* :mod:`pylidar.normalize` — height normalization
 * :mod:`pylidar.merge` — raster→point label transfer
 * :mod:`pylidar.catalog` — LAScatalog for tile-based wall-to-wall workflows
 """
@@ -19,8 +21,20 @@ from typing import Optional
 import numpy as np
 from numpy.typing import NDArray
 
-from . import catalog, decimate, io, locate_trees, merge, raster, segmentation
+from . import (
+    catalog,
+    decimate,
+    ground,
+    io,
+    locate_trees,
+    merge,
+    normalize,
+    raster,
+    segmentation,
+)
+from .ground import classify_ground
 from .merge import merge_raster_labels
+from .normalize import normalize_height
 from .raster import RasterLayout
 
 __version__ = "0.1.0"
@@ -29,11 +43,15 @@ __all__ = [
     "__version__",
     "catalog",
     "decimate",
+    "ground",
     "io",
     "locate_trees",
     "merge",
+    "normalize",
     "raster",
     "segmentation",
+    "classify_ground",
+    "normalize_height",
     "segment_trees",
     "merge_raster_labels",
 ]
